@@ -69,7 +69,9 @@ _Empty._
 | Report `Clear Add. Reporting Amounts` | 90001 | ProcessingOnly admin report — request page with Posting Date / G/L Account No. / Document No. filters + confirm dialog; delegates to `Codeunit 90000.ClearAmounts` |
 
 ### Permission Sets / Entitlements
-_Empty — no permissionset objects yet. Remember: BC 27 requires AL-defined permissionsets (XML permissionsets deprecated)._
+| Object | ID | Purpose |
+|--------|----|---------|
+| PermissionSet `Monta GL Cleanup` | 90002 | Grants Execute on Codeunit 90000 + Report 90001 and Read/Modify on tabledata `G/L Entry` — the minimum surface needed to run the MON-94 cleanup. `Assignable = true`, caption `Monta: Clear Additional Reporting Amounts on G/L Entries`. Assign only to delegated GL-cleanup admins; do not include in general-user profiles. |
 
 ## Architectural Patterns
 
@@ -79,7 +81,8 @@ _Empty — no permissionset objects yet. Remember: BC 27 requires AL-defined per
 - **Example:** `Codeunit 90000 "Clear Add. Reporting Mgmt.".ClearAmounts(var GLEntry)` called from `Report 90001.OnPreDataItem`, which then `CurrReport.Break()`s to prevent per-record iteration.
 
 ### Bulk-record mutation
-- **Shape:** procedure takes `var Record` with filters applied; does `CopyFilters` to a local Record, `FindSet(true)` for write-lock, loops with in-code condition check, `Modify(false)` per change, returns count.
+- **Shape:** procedure takes `var Record` with filters applied; does `CopyFilters` to a local Record, then `SetLoadFields` on only the columns read or mutated, then `FindSet(true)` for write-lock, loops with in-code condition check, `Modify(false)` per change, returns count.
+- **Why `SetLoadFields`:** G/L Entry has 80+ fields; loading all of them on a multi-million-row scan wastes SQL-to-server bandwidth. `SetLoadFields("Entry No.", "Additional-Currency Amount", "Add.-Currency Debit Amount", "Add.-Currency Credit Amount")` cuts per-page data transfer ~5×. Partial loading interacts cleanly with `Modify(false)` — only loaded fields are written, unloaded fields retain their DB values.
 - **Why `Modify(false)`:** these are one-shot cleanups on plain Decimal fields — `Validate` triggers aren't needed and would break the bulk semantics.
 - **Why in-code condition (vs. `SetFilter "<>0"`):** AL has no clean OR-across-fields filter; an in-code `HasAdditionalReportingAmount` check is simpler than three passes and keeps the modified-count accurate.
 
@@ -163,11 +166,16 @@ The following fields in `Monta Utility/app.json` are empty strings and must be p
 
 ## Recent Changes Log
 
+### 2026-04-21 — MON-94 post-review hardening
+- Added `SetLoadFields` on the G/L Entry scan in `Codeunit 90000` — significant perf win on large tenants.
+- Aligned test app `platform` / `application` to `27.0.0.0` (was `1.0.0.0` / `22.0.0.0` — template leftovers).
+- Added `PermissionSet 90002 "Monta GL Cleanup"` so the cleanup isn't silently SUPER-gated.
+
 ### 2026-04-21 — MON-94 feature dev
 - Scaffolded test app `Monta Utility Tests` (id range 90100..90199) via GitHub Action `Create a new test app`; added main-app dependency and registered `appFolders` / `testFolders` in AL-Go settings.
 - Added `Codeunit 90000 "Clear Add. Reporting Mgmt."` and `Report 90001 "Clear Add. Reporting Amounts"` implementing the MON-94 cleanup.
 - Added `Codeunit 90100 "Clear Add. Reporting Tests"` with 8 tests driving the implementation (TDD).
-- Established architectural patterns: logic-in-codeunit / UX-in-report separation, bulk-mutation shape (`CopyFilters` → `FindSet(true)` → in-code condition → `Modify(false)` → count), label naming (`*Qst` / `*Msg`).
+- Established architectural patterns: logic-in-codeunit / UX-in-report separation, bulk-mutation shape (`CopyFilters` → `SetLoadFields` → `FindSet(true)` → in-code condition → `Modify(false)` → count), label naming (`*Qst` / `*Msg`).
 
 ### 2026-04-21 — init-context
 - Created `.dev/project-context.md` (this file) from the AL dev profile template.

@@ -5,6 +5,11 @@ codeunit 90000 "Clear Add. Reporting Mgmt."
         GLEntryToClear: Record "G/L Entry";
     begin
         GLEntryToClear.CopyFilters(GLEntry);
+        GLEntryToClear.SetLoadFields(
+            "Entry No.",
+            "Additional-Currency Amount",
+            "Add.-Currency Debit Amount",
+            "Add.-Currency Credit Amount");
         if not GLEntryToClear.FindSet(true) then
             exit(0);
 
