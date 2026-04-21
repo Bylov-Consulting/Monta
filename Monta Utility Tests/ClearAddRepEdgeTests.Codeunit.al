@@ -1,4 +1,4 @@
-codeunit 90104 "Clear Add. Reporting Edge Tests"
+codeunit 90104 "Clear Add. Rep. Edge Tests"
 {
     Subtype = Test;
     TestPermissions = Disabled;

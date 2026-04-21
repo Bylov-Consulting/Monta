@@ -132,10 +132,10 @@ _None — `app.json` `dependencies` array is empty. Add entries here when depend
 | Object | ID | Covers |
 |--------|----|--------|
 | `Clear Add. Reporting Tests` | 90100 | `Codeunit 90000.ClearAmounts` — 8 baseline tests: field-by-field clearing, LCY untouched, filter respect, modified count, blank no-op, empty-set no-op |
-| `Clear Add. Reporting Unit Tests` | 90101 | Gap-fill unit tests: mixed-batch counter, single-field-only variants, no-filter full-table path (5 tests) |
-| `Clear Add. Reporting Report Tests` | 90102 | Report 90001 integration: RunModal success, confirm-abort, request-page filter propagation (3 tests) |
-| `Clear Add. Reporting Scenario Tests` | 90103 | End-to-end admin workflows: single-account cleanup, period-scoped cleanup, abort-preserves-everything (3 tests) |
-| `Clear Add. Reporting Edge Tests` | 90104 | Boundaries: negatives, mixed signs, sub-precision, very-large decimals, idempotency, LCY-untouched-all-signs (6 tests) |
+| `Clear Add. Rep. Unit Tests` | 90101 | Gap-fill unit tests: mixed-batch counter, single-field-only variants, no-filter full-table path (5 tests) |
+| `Clear Add. Rep. Report Tests` | 90102 | Report 90001 integration: RunModal success, confirm-abort, request-page filter propagation (3 tests) |
+| `Clear Add. Rep. Scenario Tests` | 90103 | End-to-end admin workflows: single-account cleanup, period-scoped cleanup, abort-preserves-everything (3 tests) |
+| `Clear Add. Rep. Edge Tests` | 90104 | Boundaries: negatives, mixed signs, sub-precision, very-large decimals, idempotency, LCY-untouched-all-signs (6 tests) |
 
 **Total coverage:** 25 tests. Baseline CI run for the first 8: `24718619557` (8/8 pass). Full-suite result pending the next `Test Current` dispatch.
 

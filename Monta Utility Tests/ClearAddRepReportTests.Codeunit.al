@@ -1,4 +1,4 @@
-codeunit 90102 "Clear Add. Reporting Report Tests"
+codeunit 90102 "Clear Add. Rep. Report Tests"
 {
     Subtype = Test;
     TestPermissions = Disabled;

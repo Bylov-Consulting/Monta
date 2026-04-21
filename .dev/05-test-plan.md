@@ -5,10 +5,10 @@
 | Category | Tests | Codeunit | File |
 |----------|-------|----------|------|
 | Unit (original) | 8 | 90100 | `ClearAddReportingTests.Codeunit.al` |
-| Unit (gap-fill) | 5 | 90101 | `ClearAddReportingUnitTests.Codeunit.al` |
-| Integration (report) | 3 | 90102 | `ClearAddReportingReportTests.Codeunit.al` |
-| Scenario (end-to-end) | 3 | 90103 | `ClearAddReportingScenarioTests.Codeunit.al` |
-| Edge cases | 6 | 90104 | `ClearAddReportingEdgeTests.Codeunit.al` |
+| Unit (gap-fill) | 5 | 90101 | `ClearAddRepUnitTests.Codeunit.al` |
+| Integration (report) | 3 | 90102 | `ClearAddRepReportTests.Codeunit.al` |
+| Scenario (end-to-end) | 3 | 90103 | `ClearAddRepScenarioTests.Codeunit.al` |
+| Edge cases | 6 | 90104 | `ClearAddRepEdgeTests.Codeunit.al` |
 
 **Total: 25 tests** across 5 codeunits, all isolated via `[TransactionModel(TransactionModel::AutoRollback)]` so inserts roll back at each test boundary.
 

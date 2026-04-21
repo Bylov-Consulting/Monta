@@ -1,4 +1,4 @@
-codeunit 90103 "Clear Add. Reporting Scenario Tests"
+codeunit 90103 "Clear Add. Rep. Scenario Tests"
 {
     // End-to-end scenario tests for Report 90001 "Clear Add. Reporting Amounts".
     //
