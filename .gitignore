@@ -19,3 +19,6 @@ rad.json
 .snapshots/
 cache_*
 ~$*
+.claude/rules/
+.claude/worktrees/
+.claude/settings.local.json
