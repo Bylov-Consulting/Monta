@@ -7,7 +7,7 @@ on:
       - '**.md'
       - '.github/workflows/*.yaml'
       - '!.github/workflows/CICD.yaml'
-    branches: [ 'main', 'release/*', 'feature/*' ]
+    branches: [ 'main', 'release/*' ]
 
 defaults:
   run:
@@ -29,7 +29,7 @@ env:
 jobs:
   Initialization:
     needs: [ ]
-    runs-on: [ windows-latest ]
+    runs-on: [ self-hosted,windows ]
     outputs:
       telemetryScopeJson: ${{ steps.init.outputs.telemetryScopeJson }}
       environmentsMatrixJson: ${{ steps.DetermineDeploymentEnvironments.outputs.EnvironmentsMatrixJson }}
@@ -152,7 +152,7 @@ jobs:
 
   CheckForUpdates:
     needs: [ Initialization ]
-    runs-on: [ windows-latest ]
+    runs-on: [ self-hosted,windows ]
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -206,24 +206,10 @@ jobs:
       useArtifactCache: true
       needsContext:  ${{ toJson(needs) }}
 
-  BuildPP:
-    needs: [ Initialization ]
-    if: (!failure()) && (!cancelled()) && needs.Initialization.outputs.powerPlatformSolutionFolder != ''
-    name: Build PowerPlatform Solution
-    uses: ./.github/workflows/_BuildPowerPlatformSolution.yaml
-    secrets: inherit
-    with:
-      shell: ${{ needs.Initialization.outputs.githubRunnerShell }}
-      runsOn: ${{ needs.Initialization.outputs.githubRunner }}
-      parentTelemetryScopeJson: ${{ needs.Initialization.outputs.telemetryScopeJson }}
-      project: ${{ needs.Initialization.outputs.powerPlatformSolutionFolder }}
-      projectName: ${{ needs.Initialization.outputs.powerPlatformSolutionFolder }}
-      publishArtifacts: ${{ github.ref_name == 'main' || startswith(github.ref_name, 'release/') || startswith(github.ref_name, 'releases/') || needs.Initialization.outputs.deliveryTargetsJson != '[]' || needs.Initialization.outputs.environmentCount > 0 }}
-
   CodeAnalysisUpload:
     needs: [ Initialization, Build ]
     if: (!cancelled()) && (needs.Initialization.outputs.trackALAlertsInGitHub == 'True')
-    runs-on: [ windows-latest ]
+    runs-on: [ self-hosted,windows ]
     name: Code Analysis Processing
     steps:
       - name: Checkout
@@ -254,7 +240,7 @@ jobs:
   DeployALDoc:
     needs: [ Initialization, Build ]
     if: (!cancelled()) && (needs.Build.result == 'success' || needs.Build.result == 'skipped') && needs.Initialization.outputs.generateALDocArtifact == 1 && github.ref_name == 'main'
-    runs-on: [ windows-latest ]
+    runs-on: [ self-hosted,windows ]
     name: Deploy Reference Documentation
     permissions:
       contents: read
@@ -306,8 +292,8 @@ jobs:
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
 
   Deploy:
-    needs: [ Initialization, Build, BuildPP ]
-    if: (!cancelled()) && (needs.Build.result == 'success' || needs.Build.result == 'skipped') && (needs.BuildPP.result == 'success' || needs.BuildPP.result == 'skipped') && needs.Initialization.outputs.environmentCount > 0
+    needs: [ Initialization, Build ]
+    if: (!cancelled()) && (needs.Build.result == 'success' || needs.Build.result == 'skipped') && needs.Initialization.outputs.environmentCount > 0
     strategy: ${{ fromJson(needs.Initialization.outputs.environmentsMatrixJson) }}
     runs-on: ${{ fromJson(matrix.os) }}
     name: Deploy to ${{ matrix.environment }}
@@ -374,13 +360,13 @@ jobs:
           deploymentEnvironmentsJson: ${{ needs.Initialization.outputs.deploymentEnvironmentsJson }}
 
   Deliver:
-    needs: [ Initialization, Build, BuildPP ]
-    if: (!cancelled()) && (needs.Build.result == 'success' || needs.Build.result == 'skipped') && (needs.BuildPP.result == 'success' || needs.BuildPP.result == 'skipped') && needs.Initialization.outputs.deliveryTargetsJson != '[]'
+    needs: [ Initialization, Build ]
+    if: (!cancelled()) && (needs.Build.result == 'success' || needs.Build.result == 'skipped') && needs.Initialization.outputs.deliveryTargetsJson != '[]'
     strategy:
       matrix:
         deliveryTarget: ${{ fromJson(needs.Initialization.outputs.deliveryTargetsJson) }}
       fail-fast: false
-    runs-on: [ windows-latest ]
+    runs-on: [ self-hosted,windows ]
     name: Deliver to ${{ matrix.deliveryTarget }}
     steps:
       - name: Checkout
@@ -416,9 +402,9 @@ jobs:
           artifacts: '.artifacts'
 
   PostProcess:
-    needs: [ Initialization, Build, BuildPP, Deploy, Deliver, DeployALDoc, CodeAnalysisUpload ]
+    needs: [ Initialization, Build, Deploy, Deliver, DeployALDoc, CodeAnalysisUpload ]
     if: (!cancelled())
-    runs-on: [ windows-latest ]
+    runs-on: [ self-hosted,windows ]
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
