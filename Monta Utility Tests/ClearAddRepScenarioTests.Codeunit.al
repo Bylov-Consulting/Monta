@@ -27,7 +27,7 @@ codeunit 90103 "Clear Add. Rep. Scenario Tests"
 
     [Test]
     [TransactionModel(TransactionModel::AutoRollback)]
-    [HandlerFunctions('ConfirmHandlerTrue,MessageHandlerCapture')]
+    [HandlerFunctions('RequestPageHandler,ConfirmHandlerTrue,MessageHandlerCapture')]
     procedure AdminCleansUpAccidentalACYOnSingleAccount()
     var
         GLEntry: Record "G/L Entry";
@@ -99,7 +99,7 @@ codeunit 90103 "Clear Add. Rep. Scenario Tests"
 
     [Test]
     [TransactionModel(TransactionModel::AutoRollback)]
-    [HandlerFunctions('ConfirmHandlerTrue,MessageHandlerCapture')]
+    [HandlerFunctions('RequestPageHandler,ConfirmHandlerTrue,MessageHandlerCapture')]
     procedure AdminCleansOnlyTargetPeriodLeavingOtherPeriodsUntouched()
     var
         GLEntry: Record "G/L Entry";
@@ -163,7 +163,7 @@ codeunit 90103 "Clear Add. Rep. Scenario Tests"
 
     [Test]
     [TransactionModel(TransactionModel::AutoRollback)]
-    [HandlerFunctions('ConfirmHandlerFalse')]
+    [HandlerFunctions('RequestPageHandler,ConfirmHandlerFalse')]
     procedure AdminAbortsAtConfirmLeavesAllDataIntact()
     var
         GLEntry: Record "G/L Entry";
@@ -221,6 +221,13 @@ codeunit 90103 "Clear Add. Rep. Scenario Tests"
     // =========================================================================
     // Handlers
     // =========================================================================
+
+    [RequestPageHandler]
+    procedure RequestPageHandler(var RequestPage: TestRequestPage "Clear Add. Reporting Amounts")
+    begin
+        // Admin accepts the filters seeded via RunModal's record argument and clicks OK.
+        RequestPage.OK().Invoke();
+    end;
 
     [ConfirmHandler]
     procedure ConfirmHandlerTrue(Question: Text[1024]; var Reply: Boolean)

@@ -78,7 +78,7 @@ codeunit 90102 "Clear Add. Rep. Report Tests"
     [RequestPageHandler]
     procedure RequestPageHandlerWithDateFilter(var RequestPage: TestRequestPage "Clear Add. Reporting Amounts")
     begin
-        RequestPage.GLEntry.SetFilter("Posting Date", '20260101..20260131');
+        RequestPage.GLEntry.SetFilter("Posting Date", '2026-01-01..2026-01-31');
         RequestPage.OK().Invoke();
     end;
 
