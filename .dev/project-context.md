@@ -43,7 +43,7 @@
 └── al.code-workspace           # VS Code workspace
 ```
 
-**Object-folder convention:** flat — all `.al` files live directly under `Monta Utility/` (and `Monta Utility Tests/` for tests). Filenames follow `<Name>.<Suffix>.al` (e.g. `Clear Add. Reporting Mgmt.Codeunit.al`). Revisit if the file count grows past ~20 objects.
+**Object-folder convention:** flat — all `.al` files live directly under `Monta Utility/` (and `Monta Utility Tests/` for tests). Filenames follow PascalCase `<ObjectNameNoSpaces>.<Suffix>.al` (e.g. `ClearAddReportingMgmt.Codeunit.al`) — enforced by CodeCop rule `AA0215`. Object names themselves keep spaces and dots (`"Clear Add. Reporting Mgmt."`). Revisit folder layout if file count grows past ~20 objects.
 
 **`appFolders` / `testFolders`** in `.github/AL-Go-Settings.json` are explicitly set: `["Monta Utility"]` and `["Monta Utility Tests"]`.
 
