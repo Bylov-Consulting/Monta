@@ -12,6 +12,12 @@
   "logo": "",
   "dependencies": [
     {
+      "publisher": "Bylov Consulting",
+      "name": "Monta Utility",
+      "id": "5780c9b9-f121-4c6e-885d-e39417c3e7fc",
+      "version": "1.0.0.0"
+    },
+    {
       "publisher": "Microsoft",
       "name": "Library Assert",
       "id": "dd0be2ea-f733-4d65-bb34-a28f4624fb14",
