@@ -1,5 +1,11 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/AL-Go-Actions/v9.0/.Modules/settings.schema.json",
   "type": "PTE",
-  "templateUrl": "https://github.com/microsoft/AL-Go-PTE@main"
+  "templateUrl": "https://github.com/microsoft/AL-Go-PTE@main",
+  "enableCodeCop": true,
+  "runs-on": "self-hosted,windows",
+  "CICDPushBranches": [
+    "main",
+    "release/*"
+  ]
 }
