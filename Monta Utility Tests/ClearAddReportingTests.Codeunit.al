@@ -8,6 +8,7 @@ codeunit 90100 "Clear Add. Reporting Tests"
         ClearAddReportingMgmt: Codeunit "Clear Add. Reporting Mgmt.";
 
     [Test]
+    [TransactionModel(TransactionModel::AutoRollback)]
     procedure ClearsAdditionalCurrencyAmount()
     var
         GLEntry: Record "G/L Entry";
@@ -23,6 +24,7 @@ codeunit 90100 "Clear Add. Reporting Tests"
     end;
 
     [Test]
+    [TransactionModel(TransactionModel::AutoRollback)]
     procedure ClearsAddCurrencyDebitAmount()
     var
         GLEntry: Record "G/L Entry";
@@ -38,6 +40,7 @@ codeunit 90100 "Clear Add. Reporting Tests"
     end;
 
     [Test]
+    [TransactionModel(TransactionModel::AutoRollback)]
     procedure ClearsAddCurrencyCreditAmount()
     var
         GLEntry: Record "G/L Entry";
@@ -53,6 +56,7 @@ codeunit 90100 "Clear Add. Reporting Tests"
     end;
 
     [Test]
+    [TransactionModel(TransactionModel::AutoRollback)]
     procedure DoesNotTouchLocalCurrencyAmount()
     var
         GLEntry: Record "G/L Entry";
@@ -68,6 +72,7 @@ codeunit 90100 "Clear Add. Reporting Tests"
     end;
 
     [Test]
+    [TransactionModel(TransactionModel::AutoRollback)]
     procedure RespectsFilterOnRecord()
     var
         GLEntry: Record "G/L Entry";
@@ -88,6 +93,7 @@ codeunit 90100 "Clear Add. Reporting Tests"
     end;
 
     [Test]
+    [TransactionModel(TransactionModel::AutoRollback)]
     procedure ReturnsModifiedCount()
     var
         GLEntry: Record "G/L Entry";
@@ -105,6 +111,7 @@ codeunit 90100 "Clear Add. Reporting Tests"
     end;
 
     [Test]
+    [TransactionModel(TransactionModel::AutoRollback)]
     procedure SkipsEntriesAlreadyBlank()
     var
         GLEntry: Record "G/L Entry";
@@ -120,6 +127,7 @@ codeunit 90100 "Clear Add. Reporting Tests"
     end;
 
     [Test]
+    [TransactionModel(TransactionModel::AutoRollback)]
     procedure HandlesEmptyResultSet()
     var
         GLEntry: Record "G/L Entry";

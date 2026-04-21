@@ -131,11 +131,19 @@ _None — `app.json` `dependencies` array is empty. Add entries here when depend
 ### Test Codeunits
 | Object | ID | Covers |
 |--------|----|--------|
-| `Clear Add. Reporting Tests` | 90100 | `Codeunit 90000.ClearAmounts` — 8 tests: field-by-field clearing, LCY untouched, filter respect, modified count, blank no-op, empty-set no-op |
+| `Clear Add. Reporting Tests` | 90100 | `Codeunit 90000.ClearAmounts` — 8 baseline tests: field-by-field clearing, LCY untouched, filter respect, modified count, blank no-op, empty-set no-op |
+| `Clear Add. Reporting Unit Tests` | 90101 | Gap-fill unit tests: mixed-batch counter, single-field-only variants, no-filter full-table path (5 tests) |
+| `Clear Add. Reporting Report Tests` | 90102 | Report 90001 integration: RunModal success, confirm-abort, request-page filter propagation (3 tests) |
+| `Clear Add. Reporting Scenario Tests` | 90103 | End-to-end admin workflows: single-account cleanup, period-scoped cleanup, abort-preserves-everything (3 tests) |
+| `Clear Add. Reporting Edge Tests` | 90104 | Boundaries: negatives, mixed signs, sub-precision, very-large decimals, idempotency, LCY-untouched-all-signs (6 tests) |
+
+**Total coverage:** 25 tests. Baseline CI run for the first 8: `24718619557` (8/8 pass). Full-suite result pending the next `Test Current` dispatch.
 
 ### Test Data Setup
-- **Pattern:** local helper `InsertGLEntry(AddCurrAmt, AddCurrDebit, AddCurrCredit, LCYAmount, PostingDate)` in the test codeunit. Uses `FindLast + 1` for unique `Entry No.` and `Insert(false)` to bypass validation.
+- **Pattern:** local helper `InsertGLEntry(...)` in each test codeunit. Uses `FindLast + 1` for unique `Entry No.` and `Insert(false)` to bypass validation.
 - **Why `Insert(false)`:** we need raw G/L Entries with specific ACY values; running the real posting engine would be orders of magnitude slower and isn't what's under test.
+- **Isolation:** every `[Test]` carries `[TransactionModel(TransactionModel::AutoRollback)]` — inserts and codeunit-side `Modify(false)` calls roll back at test end. This is how we handle the `FindLast + 1` collision concern.
+- **Message capture:** codeunit-level `var LastMessage: Text[1024]` assigned in `[MessageHandler]`, assert with `LastMessage.Contains(...)`. Avoids adding `Tests-TestLibraries` dependency.
 - **TestPermissions:** `Disabled` (test codeunit directly manipulates G/L Entry).
 
 ## Build & Pipeline
