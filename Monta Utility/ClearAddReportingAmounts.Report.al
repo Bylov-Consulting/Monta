@@ -4,8 +4,6 @@ report 90001 "Clear Add. Reporting Amounts"
     ApplicationArea = Suite;
     UsageCategory = Administration;
     ProcessingOnly = true;
-    AboutTitle = 'Clearing accidental Additional Reporting amounts';
-    AboutText = 'Use this report to blank the three Additional Reporting Currency amount fields on G/L Entries when Additional Reporting Currency was enabled by mistake and you want to remove residual values. Filter by posting date, G/L account, or document number to limit the scope — the cleanup is irreversible. You must have the "Monta GL Cleanup" permission set to run this report.';
 
     dataset
     {
