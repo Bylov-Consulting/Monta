@@ -49,6 +49,25 @@ codeunit 90102 "Clear Add. Rep. Report Tests"
 
     [Test]
     [TransactionModel(TransactionModel::AutoRollback)]
+    [HandlerFunctions('RequestPageHandler,ConfirmHandlerTrue,MessageHandler')]
+    procedure ReportShowsNoEntriesMessageOnZeroCount()
+    var
+        GLEntry: Record "G/L Entry";
+        EntryNo: Integer;
+    begin
+        // Insert an entry with all ACY fields already blank — cleanup will find nothing to do.
+        EntryNo := InsertGLEntry(0, 0, 0, 500.00, 20260101D);
+        GLEntry.SetRange("Entry No.", EntryNo);
+
+        Report.RunModal(Report::"Clear Add. Reporting Amounts", true, false, GLEntry);
+
+        // Must show the no-entries-cleared message, NOT the "Cleared ... on 0 G/L Entries." message.
+        Assert.IsTrue(LastMessage.Contains('No G/L Entries'), 'Zero-count path must show the "No G/L Entries" message, got: ' + LastMessage);
+        Assert.IsFalse(LastMessage.Contains('Cleared additional'), 'Zero-count path must not show the "Cleared additional" count message');
+    end;
+
+    [Test]
+    [TransactionModel(TransactionModel::AutoRollback)]
     [HandlerFunctions('RequestPageHandlerWithDateFilter,ConfirmHandlerTrue,MessageHandler')]
     procedure ReportPassesRequestPageFiltersToCodeunit()
     var

@@ -166,6 +166,12 @@ The following fields in `Monta Utility/app.json` are empty strings and must be p
 
 ## Recent Changes Log
 
+### 2026-04-22 — MON-94 warnings round
+- Report 90001: `ApplicationArea` narrowed from `All` → `Suite`; added `AboutTitle` / `AboutText` teaching tips; blocks headless execution with `HeadlessNotSupportedErr` instead of silently skipping Confirm; shows a distinct `NoEntriesClearedMsg` when the cleanup finds nothing (no more misleading "Cleared ... on 0 G/L Entries").
+- Codeunit 90000: emits audit telemetry via `Session.LogMessage('MON-94-0001', ..., TelemetryScope::ExtensionPublisher)` with `UserId`, `Filters`, and `ModifiedCount` dimensions — every run is now traceable in Application Insights. Telemetry label is `Locked = true`.
+- Report test codeunit 90102: added `ReportShowsNoEntriesMessageOnZeroCount` to lock in the new distinct-zero-message behaviour.
+- Main `app.json`: populated `brief`, `description`, `url`, and `help`.
+
 ### 2026-04-21 — MON-94 post-review hardening
 - Added `SetLoadFields` on the G/L Entry scan in `Codeunit 90000` — significant perf win on large tenants.
 - Aligned test app `platform` / `application` to `27.0.0.0` (was `1.0.0.0` / `22.0.0.0` — template leftovers).
