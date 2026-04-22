@@ -1,6 +1,6 @@
 # Project Context (Auto-Maintained)
 
-**Last Updated:** 2026-04-21 by init-context
+**Last Updated:** 2026-04-21 by MON-94 feature dev
 
 > **Purpose:** This document is the project's memory. ALL agents read this FIRST before doing any exploration or searches. Agents update this when they learn new information. This prevents redundant codebase exploration and speeds up all workflows.
 
@@ -25,7 +25,12 @@
 / (repo root)
 ├── Monta Utility/              # App folder (name contains a space — quote in shells)
 │   ├── .vscode/launch.json     # Debug launch config
-│   └── app.json                # App manifest (id, version, idRange, dependencies)
+│   ├── app.json                # App manifest (id, version, idRange, dependencies)
+│   └── *.al                    # Objects at folder root (flat structure)
+├── Monta Utility Tests/        # Test app folder (listed in testFolders)
+│   ├── .vscode/launch.json
+│   ├── app.json                # Depends on main app + Library Assert + Any
+│   └── *.Codeunit.al           # Test codeunits (Subtype=Test)
 ├── .AL-Go/
 │   ├── settings.json           # Local AL-Go settings
 │   ├── localDevEnv.ps1         # Docker-based local dev env bootstrap
@@ -38,13 +43,9 @@
 └── al.code-workspace           # VS Code workspace
 ```
 
-**Object-folder convention:** _not yet established._ When the first objects are added, pick one and record the decision here. Common choices in BC:
+**Object-folder convention:** flat — all `.al` files live directly under `Monta Utility/` (and `Monta Utility Tests/` for tests). Filenames follow PascalCase `<ObjectNameNoSpaces>.<Suffix>.al` (e.g. `ClearAddReportingMgmt.Codeunit.al`) — enforced by CodeCop rule `AA0215`. Object names themselves keep spaces and dots (`"Clear Add. Reporting Mgmt."`). Revisit folder layout if file count grows past ~20 objects.
 
-- By object type: `Monta Utility/Tables/`, `Monta Utility/Pages/`, `Monta Utility/Codeunits/`, …
-- By feature: `Monta Utility/Features/<FeatureName>/` with mixed object types inside
-- Flat inside `Monta Utility/src/`
-
-**`appFolders` / `testFolders`** in `.github/AL-Go-Settings.json` are currently empty arrays — update them when the folder layout is decided, otherwise AL-Go builds the repo root as the app.
+**`appFolders` / `testFolders`** in `.github/AL-Go-Settings.json` are explicitly set: `["Monta Utility"]` and `["Monta Utility Tests"]`.
 
 ## Key Objects Registry
 
@@ -55,54 +56,62 @@ _Empty — no tables or tableextensions defined yet._
 _Empty — no pages or pageextensions defined yet._
 
 ### Codeunits
-_Empty — no codeunits defined yet._
+| Object | ID | Purpose | Key Procedures |
+|--------|----|---------|----------------|
+| `Clear Add. Reporting Mgmt.` | 90000 | Business logic for blanking Additional Reporting amounts on G/L Entry | `ClearAmounts(var GLEntry: Record "G/L Entry"): Integer` — loops filtered records, blanks fields 68/69/70, returns modified count |
 
 ### Enums / Enum Extensions
 _Empty._
 
 ### Reports / XMLPorts / Queries
-_Empty._
+| Object | ID | Purpose |
+|--------|----|---------|
+| Report `Clear Add. Reporting Amounts` | 90001 | ProcessingOnly admin report — request page with Posting Date / G/L Account No. / Document No. filters + confirm dialog; delegates to `Codeunit 90000.ClearAmounts` |
 
 ### Permission Sets / Entitlements
-_Empty — no permissionset objects yet. Remember: BC 27 requires AL-defined permissionsets (XML permissionsets deprecated)._
+| Object | ID | Purpose |
+|--------|----|---------|
+| PermissionSet `Monta GL Cleanup` | 90002 | Grants Execute on Codeunit 90000 + Report 90001 and Read/Modify on tabledata `G/L Entry` — the minimum surface needed to run the MON-94 cleanup. `Assignable = true`, caption `Monta: Clear Additional Reporting Amounts on G/L Entries`. Assign only to delegated GL-cleanup admins; do not include in general-user profiles. |
 
 ## Architectural Patterns
 
-_No patterns are encoded in code yet. Record decisions here as they are made so agents don't have to re-derive them from scattered examples._
+### Logic vs. UX separation (TDD-driven)
+- **Rule:** testable logic lives in a `*Mgmt.Codeunit.al`; reports/pages are thin wrappers over the request page + a single codeunit call.
+- **Why:** processing reports can't be unit-tested cleanly (Confirm dialogs, request pages) — but a plain codeunit procedure taking a filtered `var Record` is trivial to test.
+- **Example:** `Codeunit 90000 "Clear Add. Reporting Mgmt.".ClearAmounts(var GLEntry)` called from `Report 90001.OnPreDataItem`, which then `CurrReport.Break()`s to prevent per-record iteration.
+
+### Bulk-record mutation
+- **Shape:** procedure takes `var Record` with filters applied; does `CopyFilters` to a local Record, then `SetLoadFields` on only the columns read or mutated, then `FindSet(true)` for write-lock, loops with in-code condition check, `Modify(false)` per change, returns count.
+- **Why `SetLoadFields`:** G/L Entry has 80+ fields; loading all of them on a multi-million-row scan wastes SQL-to-server bandwidth. `SetLoadFields("Entry No.", "Additional-Currency Amount", "Add.-Currency Debit Amount", "Add.-Currency Credit Amount")` cuts per-page data transfer ~5×. Partial loading interacts cleanly with `Modify(false)` — only loaded fields are written, unloaded fields retain their DB values.
+- **Why `Modify(false)`:** these are one-shot cleanups on plain Decimal fields — `Validate` triggers aren't needed and would break the bulk semantics.
+- **Why in-code condition (vs. `SetFilter "<>0"`):** AL has no clean OR-across-fields filter; an in-code `HasAdditionalReportingAmount` check is simpler than three passes and keeps the modified-count accurate.
 
 ### Validation Pattern
-- **Location:** _TBD_
-- **Approach:** _TBD — e.g. OnValidate triggers for simple field validation; dedicated validation codeunit procedures for anything reused or non-trivial_
-- **Example:** _TBD_
+- **Location:** _still TBD for extended base-app fields — MON-94 doesn't touch them._
 
 ### Extension Pattern
-- **Field ID range:** will draw from 90000–90010 (very small range — plan carefully; extend with a new app or request a larger range if needed)
-- **Field naming prefix:** _TBD — e.g. `Bylov ` or `MNT ` for disambiguation in extended base tables_
-- **Events:** _TBD — prefer integration events on codeunits over coupling directly to base-app triggers_
-- **Subscriber placement:** _TBD — convention is a dedicated `*EventSubscribers.Codeunit.al` per feature_
+- **Field ID range:** 90000..90010 for main app code, 90100..90199 for tests. 10 main-app IDs is tight — revisit the range if we add more than 5 more objects.
+- **Field naming prefix:** _still TBD — MON-94 doesn't add custom fields._
 
 ### Error Handling
-- **Pattern:** _TBD — BC 27 prefers `ErrorInfo` with actions and telemetry over bare `Error()`_
-- **Validation Messages:** _TBD — label naming convention, e.g. `ErrXxxMsg: Label '...'`_
+- **Pattern for admin reports:** Confirm dialog guarded by `GuiAllowed()` + `Message` on success. `Error()` is reserved for invariant violations.
+- **Label naming:** `*Qst` for confirm prompts, `*Msg` for informational messages (see `ConfirmClearQst` / `ClearedCountMsg` in Report 90001).
 
 ## Base App Integration Points
 
-### Tables We Extend
-_None yet._
+### Tables We Read/Write
+- **G/L Entry (17):** `Codeunit 90000` modifies fields 68 `"Additional-Currency Amount"`, 69 `"Add.-Currency Debit Amount"`, 70 `"Add.-Currency Credit Amount"`. No extension — we only write existing standard fields via `Record.Modify(false)`.
 
 ### Events We Subscribe To
 _None yet._
 
 ### Procedures We Call
-_None yet._
+_None from base app (yet) — MON-94 is standalone._
 
 ## Common Code Locations
 
-_No code yet — populate as features are implemented. Example entries once real:_
-
-- _Credit validation: `Codeunit 90000 "Credit Mgmt".CheckLimit()`_
-- _Posting hook: event subscriber in `Codeunit 90001 "Posting Subscribers"`_
-- _UI extensions: `PageExt 90000..90005`_
+- **Clear Additional Reporting amounts (MON-94):** `Codeunit 90000 "Clear Add. Reporting Mgmt.".ClearAmounts(var GLEntry)`
+- **Processing-report entry point for the above:** `Report 90001 "Clear Add. Reporting Amounts"` (Role Explorer → Administration)
 
 ## Dependencies
 
@@ -114,12 +123,31 @@ _None — `app.json` `dependencies` array is empty. Add entries here when depend
 
 ## Testing Infrastructure
 
+### Test App
+- **Folder:** `Monta Utility Tests/`
+- **app.json id:** `66ea9ba7-587d-4c7e-922c-6cca1682b962`
+- **idRanges:** 90100..90199
+- **Dependencies:** Main app (`Monta Utility`, id `5780c9b9-...`), Microsoft `Library Assert` (`dd0be2ea-...`), Microsoft `Any` (`e7320ebb-...`)
+- **Created via:** GitHub Actions workflow `Create a new test app` (AL-Go PTE). Run `gh workflow run "Create a new test app" --ref <branch> -f name="..." -f publisher="..." -f idrange="..." -f sampleCode=true -f directCommit=true -f useGhTokenWorkflow=true` from any feature branch.
+- **Post-scaffold fix-ups:** (a) add the main app as a dependency (AL-Go doesn't do this automatically); (b) register the folder in `.github/AL-Go-Settings.json` under `testFolders`.
+
 ### Test Codeunits
-_Empty — no test app or test codeunits yet._
+| Object | ID | Covers |
+|--------|----|--------|
+| `Clear Add. Reporting Tests` | 90100 | `Codeunit 90000.ClearAmounts` — 8 baseline tests: field-by-field clearing, LCY untouched, filter respect, modified count, blank no-op, empty-set no-op |
+| `Clear Add. Rep. Unit Tests` | 90101 | Gap-fill unit tests: mixed-batch counter, single-field-only variants, no-filter full-table path (5 tests) |
+| `Clear Add. Rep. Report Tests` | 90102 | Report 90001 integration: RunModal success, confirm-abort, request-page filter propagation (3 tests) |
+| `Clear Add. Rep. Scenario Tests` | 90103 | End-to-end admin workflows: single-account cleanup, period-scoped cleanup, abort-preserves-everything (3 tests) |
+| `Clear Add. Rep. Edge Tests` | 90104 | Boundaries: negatives, mixed signs, sub-precision, very-large decimals, idempotency, LCY-untouched-all-signs (6 tests) |
+
+**Total coverage:** 25 tests. Baseline CI run for the first 8: `24718619557` (8/8 pass). Full-suite result pending the next `Test Current` dispatch.
 
 ### Test Data Setup
-- **Location:** _TBD — convention: separate test app under `Monta Utility Tests/` with its own `app.json` and `testFolders` entry in AL-Go settings_
-- **Patterns:** _TBD — library codeunits + per-feature test codeunits is the BC norm_
+- **Pattern:** local helper `InsertGLEntry(...)` in each test codeunit. Uses `FindLast + 1` for unique `Entry No.` and `Insert(false)` to bypass validation.
+- **Why `Insert(false)`:** we need raw G/L Entries with specific ACY values; running the real posting engine would be orders of magnitude slower and isn't what's under test.
+- **Isolation:** every `[Test]` carries `[TransactionModel(TransactionModel::AutoRollback)]` — inserts and codeunit-side `Modify(false)` calls roll back at test end. This is how we handle the `FindLast + 1` collision concern.
+- **Message capture:** codeunit-level `var LastMessage: Text[1024]` assigned in `[MessageHandler]`, assert with `LastMessage.Contains(...)`. Avoids adding `Tests-TestLibraries` dependency.
+- **TestPermissions:** `Disabled` (test codeunit directly manipulates G/L Entry).
 
 ## Build & Pipeline
 
@@ -137,6 +165,23 @@ The following fields in `Monta Utility/app.json` are empty strings and must be p
 - `privacyStatement`, `EULA`, `help`, `url`, `logo`, `brief`, `description`
 
 ## Recent Changes Log
+
+### 2026-04-22 — MON-94 warnings round
+- Report 90001: `ApplicationArea` narrowed from `All` → `Suite`; blocks headless execution with `HeadlessNotSupportedErr` instead of silently skipping Confirm; shows a distinct `NoEntriesClearedMsg` when the cleanup finds nothing (no more misleading "Cleared ... on 0 G/L Entries"). (Teaching tips via `AboutTitle`/`AboutText` are Page-only and cannot be applied at the report level — see `memory/al_property_objecttype_gotchas.md`.)
+- Codeunit 90000: emits audit telemetry via `Session.LogMessage('MON-94-0001', ..., TelemetryScope::ExtensionPublisher)` with `UserId`, `Filters`, and `ModifiedCount` dimensions — every run is now traceable in Application Insights. Telemetry label is `Locked = true`.
+- Report test codeunit 90102: added `ReportShowsNoEntriesMessageOnZeroCount` to lock in the new distinct-zero-message behaviour.
+- Main `app.json`: populated `brief`, `description`, `url`, and `help`.
+
+### 2026-04-21 — MON-94 post-review hardening
+- Added `SetLoadFields` on the G/L Entry scan in `Codeunit 90000` — significant perf win on large tenants.
+- Aligned test app `platform` / `application` to `27.0.0.0` (was `1.0.0.0` / `22.0.0.0` — template leftovers).
+- Added `PermissionSet 90002 "Monta GL Cleanup"` so the cleanup isn't silently SUPER-gated.
+
+### 2026-04-21 — MON-94 feature dev
+- Scaffolded test app `Monta Utility Tests` (id range 90100..90199) via GitHub Action `Create a new test app`; added main-app dependency and registered `appFolders` / `testFolders` in AL-Go settings.
+- Added `Codeunit 90000 "Clear Add. Reporting Mgmt."` and `Report 90001 "Clear Add. Reporting Amounts"` implementing the MON-94 cleanup.
+- Added `Codeunit 90100 "Clear Add. Reporting Tests"` with 8 tests driving the implementation (TDD).
+- Established architectural patterns: logic-in-codeunit / UX-in-report separation, bulk-mutation shape (`CopyFilters` → `SetLoadFields` → `FindSet(true)` → in-code condition → `Modify(false)` → count), label naming (`*Qst` / `*Msg`).
 
 ### 2026-04-21 — init-context
 - Created `.dev/project-context.md` (this file) from the AL dev profile template.
