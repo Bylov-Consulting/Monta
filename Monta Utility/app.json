@@ -2,7 +2,7 @@
   "id": "5780c9b9-f121-4c6e-885d-e39417c3e7fc",
   "name": "Monta Utility",
   "publisher": "Bylov Consulting",
-  "version": "1.0.0.0",
+  "version": "1.1.0.0",
   "brief": "Cleanup utilities for Business Central tenants, starting with residual Additional Reporting Currency amounts on G/L Entry.",
   "description": "Monta Utility ships administrative cleanup routines for Business Central. The first routine is a processing report that blanks the three Additional Reporting Currency fields on G/L Entry (\"Additional-Currency Amount\", \"Add.-Currency Debit Amount\", \"Add.-Currency Credit Amount\") left behind when Additional Reporting Currency was configured on a tenant by mistake and later removed. Access is gated by the shipped \"Monta GL Cleanup\" permission set; every run is logged to telemetry (UserId, filters applied, row count).",
   "privacyStatement": "",
