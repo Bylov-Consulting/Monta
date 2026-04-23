@@ -4,6 +4,7 @@ report 90001 "Clear Add. Reporting Amounts"
     ApplicationArea = Suite;
     UsageCategory = Administration;
     ProcessingOnly = true;
+    Permissions = tabledata "G/L Entry" = rm;
 
     dataset
     {

@@ -1,5 +1,7 @@
 codeunit 90000 "Clear Add. Reporting Mgmt."
 {
+    Permissions = tabledata "G/L Entry" = rm;
+
     procedure ClearAmounts(var GLEntry: Record "G/L Entry") ModifiedCount: Integer
     var
         GLEntryToClear: Record "G/L Entry";
