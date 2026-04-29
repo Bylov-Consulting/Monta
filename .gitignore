@@ -23,4 +23,5 @@ cache_*
 .claude/rules/
 .claude/worktrees/
 .claude/settings.local.json
+.dev/
 .artifacts/
