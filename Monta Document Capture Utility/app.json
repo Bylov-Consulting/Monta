@@ -1,0 +1,39 @@
+{
+  "id": "2ce68cba-96aa-4f2b-80bd-502b16187a0f",
+  "name": "Monta Document Capture Utility",
+  "publisher": "Bylov Consulting",
+  "version": "1.0.0.0",
+  "brief": "Monta-tuned behavior overlays for Continia Document Capture, starting with cross-company template-copy suppression.",
+  "description": "Monta Document Capture Utility ships behavior overlays for Continia Document Capture (CDC). The first overlay suppresses CDC's cross-company template-copy prompt by default (configurable per company on the DC setup card). Telemetry is emitted on each suppression. The toggle defaults to ON on install.",
+  "privacyStatement": "",
+  "EULA": "",
+  "help": "https://github.com/Bylov-Consulting/Monta-Utility#readme",
+  "url": "https://github.com/Bylov-Consulting/Monta-Utility",
+  "logo": "",
+  "dependencies": [
+    {
+      "id": "6da8dd2f-e698-461f-9147-8e404244dd85",
+      "name": "Continia Document Capture",
+      "publisher": "Continia Software",
+      "version": "27.3.0.0"
+    }
+  ],
+  "screenshots": [],
+  "platform": "27.0.0.0",
+  "application": "27.0.0.0",
+  "runtime": "16.0",
+  "idRanges": [
+    {
+      "from": 50100,
+      "to": 50199
+    }
+  ],
+  "features": [
+    "NoImplicitWith"
+  ],
+  "resourceExposurePolicy": {
+    "allowDebugging": true,
+    "allowDownloadingSource": true,
+    "includeSourceInSymbolFile": true
+  }
+}

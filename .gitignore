@@ -1,4 +1,5 @@
 *.app
+!dependencies/*.app
 *.flf
 *.bclicense
 *.g.xlf
@@ -22,4 +23,5 @@ cache_*
 .claude/rules/
 .claude/worktrees/
 .claude/settings.local.json
+.dev/
 .artifacts/

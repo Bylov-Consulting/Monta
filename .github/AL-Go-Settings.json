@@ -9,7 +9,8 @@
     "release/*"
   ],
   "appFolders": [
-    "Monta Utility"
+    "Monta Utility",
+    "Monta Document Capture Utility"
   ],
   "testFolders": [
     "Monta Utility Tests"
