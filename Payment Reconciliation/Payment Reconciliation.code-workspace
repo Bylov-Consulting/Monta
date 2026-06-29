@@ -4,6 +4,9 @@
       "path": "Monta Payment Reconciliation"
     },
     {
+      "path": "Monta Payment Reconciliation.Test"
+    },
+    {
       "path": ".AL-Go"
     }
   ],
