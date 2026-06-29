@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/AL-Go-Actions/v9.0/.Modules/settings.schema.json",
   "country": "w1",
-  "appFolders": [],
+  "appFolders": [ "Monta Document Capture Utility" ],
   "testFolders": [],
   "bcptTestFolders": [],
   "repoVersion": "1.4",

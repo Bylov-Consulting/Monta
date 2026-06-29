@@ -8,9 +8,5 @@
     "main",
     "release/*"
   ],
-  "appFolders": [
-    "Monta Document Capture Utility"
-  ],
-  "testFolders": [],
   "templateSha": "28c060aecd801a24e69346bea0c3cb193f327183"
 }
