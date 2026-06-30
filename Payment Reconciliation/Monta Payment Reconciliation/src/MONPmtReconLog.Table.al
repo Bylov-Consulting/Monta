@@ -15,17 +15,14 @@ table 50203 "MON Pmt Recon Log"
         field(1; "Bank Account No."; Code[20])
         {
             Caption = 'Bank Account No.';
-            DataClassification = CustomerContent;
         }
         field(2; "Statement No."; Code[20])
         {
             Caption = 'Statement No.';
-            DataClassification = CustomerContent;
         }
         field(3; "Statement Line No."; Integer)
         {
             Caption = 'Statement Line No.';
-            DataClassification = CustomerContent;
         }
         field(10; "Status"; Option)
         {
@@ -46,13 +43,11 @@ table 50203 "MON Pmt Recon Log"
         field(20; "Bank Acc. Ledger Entry No."; Integer)
         {
             Caption = 'Bank Acc. Ledger Entry No.';
-            DataClassification = CustomerContent;
             // The open Bank Account Ledger Entry the original call created; returned verbatim on replay.
         }
         field(21; "Payment Document No."; Code[20])
         {
             Caption = 'Payment Document No.';
-            DataClassification = CustomerContent;
             // Document No. of the posted bank receipt (for traceability); not used by the replay path.
         }
     }

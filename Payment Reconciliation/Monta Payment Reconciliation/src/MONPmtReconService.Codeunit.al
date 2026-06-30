@@ -50,6 +50,9 @@ codeunit 50202 "MON Pmt Recon Service"
     /// </summary>
     /// <param name="Request">The composite request described above.</param>
     /// <returns>The response described above.</returns>
+    /// <remarks>Idempotent on the reconciliation line (Bank Account No. + Statement No. + Statement Line No.):
+    /// a retry MUST resend a byte-identical request body to be recognised as a replay; a different payload for
+    /// the same line is rejected as a conflict.</remarks>
     var
         AlreadyReconciledErr: Label 'Reconciliation line %1/%2 has already been reconciled by a different request.', Comment = '%1 = Statement No., %2 = Statement Line No.';
 
@@ -92,10 +95,16 @@ codeunit 50202 "MON Pmt Recon Service"
         // --- Idempotency: the reconciliation line identity is the key. A completed call left a Posted log
         // row for that line; a later call for the SAME line replays its cached result (identical request)
         // or is rejected as a conflict (a different payload / hash). Checked BEFORE any posting so a replay
-        // posts nothing and a conflict creates no second receipt. The lookup sees the prior call's
-        // uncommitted row because both calls run in the one outer transaction. ---
+        // posts nothing and a conflict creates no second receipt. The PRIMARY scenario is a cross-transaction
+        // agent retry that reads the prior call's COMMITTED row; an in-transaction repeat reading the prior
+        // uncommitted row is a secondary benefit. LockTable serializes concurrent first-time calls for the
+        // same line so the loser surfaces the designed conflict error, not a raw duplicate-key error from the
+        // Insert below. NOTE: the hash is over the serialized request, so a retry must resend a byte-identical
+        // JSON body to replay (see <remarks>); an order-independent canonical hash would relax this. ---
         RequestHash := this.ComputeRequestHash(Request);
+        PmtReconLog.LockTable();
         if PmtReconLog.Get(BankAccountNo, StatementNo, StatementLineNo) then
+            // A Failed row (reserved for slice 8) is retryable -> fall through to re-post; only Posted gates.
             if PmtReconLog.Status = PmtReconLog.Status::Posted then begin
                 if PmtReconLog."Request Hash" = RequestHash then
                     exit(this.BuildResponse(PmtReconLog."Bank Acc. Ledger Entry No.")); // idempotent replay
@@ -161,9 +170,10 @@ codeunit 50202 "MON Pmt Recon Service"
         PmtReconLog.Status := PmtReconLog.Status::Posted;
         PmtReconLog."Request Hash" := RequestHash;
         PmtReconLog."Bank Acc. Ledger Entry No." := BankAccountLedgerEntryNo;
+        BankAccountLedgerEntry.SetLoadFields("Document No.");
         if BankAccountLedgerEntry.Get(BankAccountLedgerEntryNo) then
             PmtReconLog."Payment Document No." := BankAccountLedgerEntry."Document No.";
-        PmtReconLog.Insert(true);
+        PmtReconLog.Insert(false);
 
         // --- Build the response per the stable contract ---
         // MatchBankEntryToReconLine either succeeds or raises, so reaching here proves the match
