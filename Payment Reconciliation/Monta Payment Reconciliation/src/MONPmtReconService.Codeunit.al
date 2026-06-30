@@ -50,13 +50,17 @@ codeunit 50202 "MON Pmt Recon Service"
     /// </summary>
     /// <param name="Request">The composite request described above.</param>
     /// <returns>The response described above.</returns>
+    var
+        AlreadyReconciledErr: Label 'Reconciliation line %1/%2 has already been reconciled by a different request.', Comment = '%1 = Statement No., %2 = Statement Line No.';
+
     [CommitBehavior(CommitBehavior::Ignore)]
     procedure PostAndReconcile(Request: JsonObject): JsonObject
     var
         PmtReconPost: Codeunit "MON Pmt Recon Post";
         PmtReconMatch: Codeunit "MON Pmt Recon Match";
+        PmtReconLog: Record "MON Pmt Recon Log";
+        BankAccountLedgerEntry: Record "Bank Account Ledger Entry";
         TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary;
-        Response: JsonObject;
         PaymentsTok: JsonToken;
         PaymentTok: JsonToken;
         AppliesToTok: JsonToken;
@@ -72,6 +76,7 @@ codeunit 50202 "MON Pmt Recon Service"
         JournalBatchName: Code[10];
         ExternalDocumentNo: Code[35];
         CustomerNo: Code[20];
+        RequestHash: Code[64];
         StatementLineNo: Integer;
         BufLineNo: Integer;
         BankAccountLedgerEntryNo: Integer;
@@ -83,6 +88,19 @@ codeunit 50202 "MON Pmt Recon Service"
         JournalTemplateName := CopyStr(this.GetText(Request, 'journalTemplateName'), 1, MaxStrLen(JournalTemplateName));
         JournalBatchName := CopyStr(this.GetText(Request, 'journalBatchName'), 1, MaxStrLen(JournalBatchName));
         ExternalDocumentNo := CopyStr(this.GetText(Request, 'externalDocumentNo'), 1, MaxStrLen(ExternalDocumentNo));
+
+        // --- Idempotency: the reconciliation line identity is the key. A completed call left a Posted log
+        // row for that line; a later call for the SAME line replays its cached result (identical request)
+        // or is rejected as a conflict (a different payload / hash). Checked BEFORE any posting so a replay
+        // posts nothing and a conflict creates no second receipt. The lookup sees the prior call's
+        // uncommitted row because both calls run in the one outer transaction. ---
+        RequestHash := this.ComputeRequestHash(Request);
+        if PmtReconLog.Get(BankAccountNo, StatementNo, StatementLineNo) then
+            if PmtReconLog.Status = PmtReconLog.Status::Posted then begin
+                if PmtReconLog."Request Hash" = RequestHash then
+                    exit(this.BuildResponse(PmtReconLog."Bank Acc. Ledger Entry No.")); // idempotent replay
+                Error(AlreadyReconciledErr, StatementNo, StatementLineNo); // conflicting replay
+            end;
 
         // --- Flatten EVERY payment (slice 5: one or more customers) and its FULL appliesTo set into the
         // per-customer buffer: one row per (customer, invoice, amount) so the unified poster builds one
@@ -132,12 +150,55 @@ codeunit 50202 "MON Pmt Recon Service"
         PmtReconMatch.MatchBankEntryToReconLine(
             BankAccountNo, StatementNo, StatementLineNo, BankAccountLedgerEntryNo);
 
+        // --- Record the idempotency log row so any later call for this reconciliation line replays (same
+        // request) or is rejected as a conflict (different request). No intermediate Commit: the row is
+        // part of this single transaction and is committed at the outer boundary together with the posting
+        // and match. ---
+        PmtReconLog.Init();
+        PmtReconLog."Bank Account No." := BankAccountNo;
+        PmtReconLog."Statement No." := StatementNo;
+        PmtReconLog."Statement Line No." := StatementLineNo;
+        PmtReconLog.Status := PmtReconLog.Status::Posted;
+        PmtReconLog."Request Hash" := RequestHash;
+        PmtReconLog."Bank Acc. Ledger Entry No." := BankAccountLedgerEntryNo;
+        if BankAccountLedgerEntry.Get(BankAccountLedgerEntryNo) then
+            PmtReconLog."Payment Document No." := BankAccountLedgerEntry."Document No.";
+        PmtReconLog.Insert(true);
+
         // --- Build the response per the stable contract ---
         // MatchBankEntryToReconLine either succeeds or raises, so reaching here proves the match
         // was applied -> reconciliationLineMatched is unconditionally true on this path.
+        exit(this.BuildResponse(BankAccountLedgerEntryNo));
+    end;
+
+    /// <summary>
+    /// Builds the stable response: the open Bank Account Ledger Entry No. of the reconciled receipt plus
+    /// reconciliationLineMatched = true. Used both on the fresh post+match path and the idempotent replay
+    /// path, so both return the IDENTICAL shape and the cached entry replays verbatim.
+    /// </summary>
+    local procedure BuildResponse(BankAccountLedgerEntryNo: Integer): JsonObject
+    var
+        Response: JsonObject;
+    begin
         Response.Add('bankAccountLedgerEntryNo', BankAccountLedgerEntryNo);
         Response.Add('reconciliationLineMatched', true);
         exit(Response);
+    end;
+
+    /// <summary>
+    /// Stable SHA256 hex digest of the WHOLE request (header scalars + payments), used as the idempotency
+    /// fingerprint. The same JsonObject serialises to the same text, so an identical request hashes equal
+    /// (replay), while any change to customer / invoice / amount / etc. changes the text and therefore the
+    /// hash (conflict). Standard System Application hashing — no external dependency.
+    /// </summary>
+    local procedure ComputeRequestHash(Request: JsonObject): Code[64]
+    var
+        CryptographyManagement: Codeunit "Cryptography Management";
+        HashAlgorithmType: Option MD5,SHA1,SHA256,SHA384,SHA512;
+        RequestText: Text;
+    begin
+        Request.WriteTo(RequestText);
+        exit(CopyStr(CryptographyManagement.GenerateHash(RequestText, HashAlgorithmType::SHA256), 1, 64));
     end;
 
     local procedure GetText(Obj: JsonObject; KeyName: Text): Text

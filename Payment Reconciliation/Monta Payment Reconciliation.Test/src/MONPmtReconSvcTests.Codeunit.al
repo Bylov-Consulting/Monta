@@ -739,7 +739,6 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         GenJournalBatch: Record "Gen. Journal Batch";
         BankAccReconciliation: Record "Bank Acc. Reconciliation";
         BankAccReconLine: Record "Bank Acc. Reconciliation Line";
-        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
         PmtReconService: Codeunit "MON Pmt Recon Service";
         Request1: JsonObject;
         Request2: JsonObject;
@@ -812,14 +811,11 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         // 'Reconciliation line %1/%2 has already been reconciled by a different request.' — assert on the
         // distinctive substring. Today there is NO conflict check (the second call either posts+matches a
         // second entry or throws an unrelated error), so this substring is ABSENT -> RED.
+        // The conflict is rejected BEFORE any posting (the idempotency gate runs first), so no second
+        // receipt is created. A post-asserterror Bank Account Ledger Entry count cannot prove this: the
+        // caught error rolls the whole un-committed test transaction back past Request1 too — ExpectedError
+        // above is the load-bearing proof of the conflict behaviour.
         Assert.ExpectedError('already been reconciled');
-
-        // [THEN] No second bank entry survives the rejected call: exactly one Bank Account Ledger Entry on
-        // the (fresh) bank account (GREEN rejects BEFORE posting, so the second receipt is never created).
-        BankAccLedgerEntry.SetRange("Bank Account No.", BankAccount."No.");
-        Assert.AreEqual(
-            1, BankAccLedgerEntry.Count(),
-            'The conflicting call must NOT post a second Bank Account Ledger Entry.');
     end;
 
     /// <summary>
