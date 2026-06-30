@@ -1354,6 +1354,60 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         Assert.ExpectedError('appears more than once');
     end;
 
+    [Test]
+    procedure PostAndReconcile_RejectsWriteOffGeApplied()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        WriteOffGLAccount: Record "G/L Account";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        AppliedCustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+    begin
+        // [SCENARIO] The bank (cash) amount of the posting is BankAmount = Σ(applies) - Σ(write-offs). It is
+        // never validated to be strictly positive, so a write-off that EQUALS (or exceeds) the applied total
+        // drives BankAmount to 0 (or negative) and posts a zero/negative bank receipt — a financial-integrity
+        // defect (the statement would reconcile against a non-receipt). PostAndReconcile must instead REJECT
+        // such a request, reporting that the write-off total must be less than the applied total, BEFORE the
+        // posting completes.
+
+        // [GIVEN] A customer with ONE posted invoice of amount X (the full applied amount). Capture its open
+        // Cust. Ledger Entry No.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), AppliedCustLedgerEntryNo, InvoiceAmount);
+
+        // [GIVEN] A direct-posting write-off G/L account (well-formed, so the write-off ROW itself is valid and
+        // the ONLY defect is its amount), plus a valid bank, journal and ONE reconciliation line — every header
+        // reference resolves, so the request passes schema + per-row validation and reaches the bank-amount
+        // computation under test. (The recon line is scaffolding: the guard fires during posting, before any
+        // match, so its Statement Amount is immaterial to the rejection.)
+        CreateDirectPostingGLAccount(WriteOffGLAccount);
+        ArrangeBankJournalRecon(
+            BankAccount, GenJournalTemplate, GenJournalBatch, InvoiceAmount, StatementNo, StatementLineNo);
+
+        // [GIVEN] A request whose ONE payment applies the FULL invoice X to its CLE AND carries a writeOff for
+        // the SAME amount X -> BankAmount = X - X = 0. The write-off equals the applied total exactly, so the
+        // bank receipt would be zero — the boundary the guard (BankAmount <= 0) must reject.
+        Request := BuildWriteOffRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer."No.", AppliedCustLedgerEntryNo, InvoiceAmount,
+            WriteOffGLAccount."No.", InvoiceAmount);
+
+        // [WHEN/THEN] PostAndReconcile must reject the equal-write-off request with the bank-amount guard. RED:
+        // no such guard exists today — BankAmount = 0 flows into the bank line and the poster posts a zero
+        // bank entry (or fails later with an unrelated/opaque posting error). Either way the specific
+        // 'must be less than the total applied' substring is absent today -> RED.
+        asserterror PmtReconService.PostAndReconcile(Request);
+        Assert.ExpectedError('must be less than the total applied');
+    end;
+
     /// <summary>
     /// Arranges the non-payment scaffolding shared by the slice-3v validation tests: a fresh bank account, a
     /// gen. journal template + batch, and ONE unmatched Bank Acc. Reconciliation line (Statement Type = Bank

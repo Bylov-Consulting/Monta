@@ -239,6 +239,69 @@ codeunit 50301 "MON Pmt Recon Match Tests"
         Assert.ExpectedError('is not open and cannot be matched');
     end;
 
+    [Test]
+    procedure MatchRejectsAlreadyAppliedLine()
+    var
+        BankAccount: Record "Bank Account";
+        BankAccReconciliation: Record "Bank Acc. Reconciliation";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        PmtReconMatch: Codeunit "MON Pmt Recon Match";
+        FirstBankEntryNo: Integer;
+        SecondBankEntryNo: Integer;
+        FirstAmount: Decimal;
+        SecondAmount: Decimal;
+    begin
+        // [SCENARIO] A reconciliation line that ALREADY carries an applied bank ledger entry must NOT be
+        // matched a SECOND time. The idempotency log only tracks API calls, so a line already matched by
+        // another source (a manual UI match, or — as here — a prior MatchBankEntryToReconLine call) is not
+        // caught by it. Without a per-line guard a fresh match posts and applies AGAIN, doubling Applied
+        // Entries / Applied Amount on the line (a financial double-apply). The match must instead be rejected
+        // by a guard that reports the line already has applied entries, BEFORE the second ApplyEntries runs.
+
+        // [GIVEN] A bank account carrying TWO independent OPEN receipts (slice 1) — two distinct open bank
+        // ledger entries on the SAME bank account, each settling its own fresh invoice.
+        LibraryERM.CreateBankAccount(BankAccount);
+        FirstBankEntryNo := CreateOpenBankReceiptOn(BankAccount, FirstAmount);
+        SecondBankEntryNo := CreateOpenBankReceiptOn(BankAccount, SecondAmount);
+
+        // [GIVEN] Sanity: the two receipts are genuinely distinct ledger entries, so the second match is a
+        // real attempt to apply a NEW entry to an already-applied line (not a re-apply of the same entry).
+        Assert.AreNotEqual(
+            FirstBankEntryNo, SecondBankEntryNo,
+            'Precondition: the two bank receipts must be distinct bank ledger entries.');
+
+        // [GIVEN] A standard Bank Acc. Reconciliation + ONE line on that bank, sized to the FIRST receipt so
+        // the first match balances cleanly (Statement Amount = FirstAmount, nothing applied yet).
+        LibraryERM.CreateBankAccReconciliation(
+            BankAccReconciliation, BankAccount."No.",
+            BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+        LibraryERM.CreateBankAccReconciliationLn(BankAccReconLine, BankAccReconciliation);
+        BankAccReconLine.Validate("Statement Amount", FirstAmount);
+        BankAccReconLine.Difference := FirstAmount; // unmatched: nothing applied yet
+        BankAccReconLine.Modify(true);
+
+        // [GIVEN] The FIRST entry is matched to the line via the known-green slice-2 path, so the line now
+        // carries exactly ONE applied entry — the precondition the guard under test must detect.
+        PmtReconMatch.MatchBankEntryToReconLine(
+            BankAccount."No.", BankAccReconLine."Statement No.", BankAccReconLine."Statement Line No.", FirstBankEntryNo);
+        BankAccReconLine.Get(
+            BankAccReconLine."Statement Type"::"Bank Reconciliation",
+            BankAccount."No.", BankAccReconLine."Statement No.", BankAccReconLine."Statement Line No.");
+        Assert.AreEqual(
+            1, BankAccReconLine."Applied Entries",
+            'Precondition: the line must carry exactly one applied entry after the first match.');
+
+        // [WHEN] Matching the SECOND open entry to the SAME, already-applied line.
+        asserterror PmtReconMatch.MatchBankEntryToReconLine(
+            BankAccount."No.", BankAccReconLine."Statement No.", BankAccReconLine."Statement Line No.", SecondBankEntryNo);
+
+        // [THEN] The match is rejected because the line already has applied entries. RED: no such guard exists
+        // yet — the wrong-bank/non-open guards both pass (same bank, second entry open), so today the second
+        // ApplyEntries simply runs and Applied Entries becomes 2 (no error -> asserterror fails), or codeunit
+        // 375 throws an unrelated error -> the specific substring is absent. Either way -> RED.
+        Assert.ExpectedError('already has applied entries');
+    end;
+
     /// <summary>
     /// Arranges exactly one OPEN Bank Account Ledger Entry on <paramref name="BankAccount"/> by posting a
     /// customer payment (slice 1) that fully settles a fresh posted sales invoice. Mirrors the slice-2
