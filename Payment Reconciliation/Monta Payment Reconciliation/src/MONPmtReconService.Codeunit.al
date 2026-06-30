@@ -2,6 +2,39 @@ codeunit 50202 "MON Pmt Recon Service"
 {
     Access = Public;
 
+    var
+        AlreadyReconciledErr: Label 'Reconciliation line %1/%2 has already been reconciled by a different request.', Comment = '%1 = Statement No., %2 = Statement Line No.';
+        InvalidRequestErr: Label 'The request body is not a valid JSON object.';
+        RequiredFieldErr: Label 'The request is missing required field ''%1''.', Comment = '%1 = the missing JSON field name';
+        NoPaymentsErr: Label 'The request must contain at least one payment.';
+        PaymentNoAppliesErr: Label 'Each payment must apply to at least one customer ledger entry.';
+        DuplicateApplyErr: Label 'Customer ledger entry %1 appears more than once in the request.', Comment = '%1 = Cust. Ledger Entry No.';
+        SuccessTelemetryTxt: Label 'PostAndReconcile posted and matched the reconciliation line.', Locked = true;
+
+    /// <summary>
+    /// Text-boundary wrapper over <see cref="PostAndReconcile"/> for the OData [ServiceEnabled] bound
+    /// action: the agent sends the request as a JSON string and receives the response as a JSON string.
+    /// Parses the text into the JsonObject contract, runs the composite, and serialises the response
+    /// back to text. ALL business logic lives in PostAndReconcile (fully unit-tested across slices 3-7);
+    /// this only crosses the Text&lt;-&gt;JSON boundary that an OData action parameter (Edm.String) needs,
+    /// keeping the bound action on the API page a one-line delegation.
+    /// </summary>
+    /// <param name="Request">The composite request (see PostAndReconcile) serialised as a JSON string.</param>
+    /// <returns>The PostAndReconcile response serialised as a JSON string.</returns>
+    [CommitBehavior(CommitBehavior::Ignore)]
+    procedure PostAndReconcileJson(Request: Text): Text
+    var
+        RequestObj: JsonObject;
+        ResponseObj: JsonObject;
+        ResponseText: Text;
+    begin
+        if not RequestObj.ReadFrom(Request) then
+            Error(InvalidRequestErr);
+        ResponseObj := this.PostAndReconcile(RequestObj);
+        ResponseObj.WriteTo(ResponseText);
+        exit(ResponseText);
+    end;
+
     /// <summary>
     /// Agent-facing composite: in ONE transaction (no intermediate Commit) posts an incoming
     /// customer payment to the bank — creating the open Bank Account Ledger Entry — AND matches that
@@ -51,49 +84,16 @@ codeunit 50202 "MON Pmt Recon Service"
     /// <param name="Request">The composite request described above.</param>
     /// <returns>The response described above.</returns>
     /// <remarks>Idempotent on the reconciliation line (Bank Account No. + Statement No. + Statement Line No.):
-    /// a retry MUST resend a byte-identical request body to be recognised as a replay; a different payload for
-    /// the same line is rejected as a conflict.</remarks>
-    var
-        AlreadyReconciledErr: Label 'Reconciliation line %1/%2 has already been reconciled by a different request.', Comment = '%1 = Statement No., %2 = Statement Line No.';
-        InvalidRequestErr: Label 'The request body is not a valid JSON object.';
-        RequiredFieldErr: Label 'The request is missing required field ''%1''.', Comment = '%1 = the missing JSON field name';
-        NoPaymentsErr: Label 'The request must contain at least one payment.';
-        PaymentNoAppliesErr: Label 'Each payment must apply to at least one customer ledger entry.';
-        DuplicateApplyErr: Label 'Customer ledger entry %1 appears more than once in the request.', Comment = '%1 = Cust. Ledger Entry No.';
-        SuccessTelemetryTxt: Label 'PostAndReconcile posted and matched the reconciliation line.', Locked = true;
-
-    /// <summary>
-    /// Text-boundary wrapper over <see cref="PostAndReconcile"/> for the OData [ServiceEnabled] bound
-    /// action: the agent sends the request as a JSON string and receives the response as a JSON string.
-    /// Parses the text into the JsonObject contract, runs the composite, and serialises the response
-    /// back to text. ALL business logic lives in PostAndReconcile (fully unit-tested across slices 3-7);
-    /// this only crosses the Text&lt;-&gt;JSON boundary that an OData action parameter (Edm.String) needs,
-    /// keeping the bound action on the API page a one-line delegation.
-    /// </summary>
-    /// <param name="Request">The composite request (see PostAndReconcile) serialised as a JSON string.</param>
-    /// <returns>The PostAndReconcile response serialised as a JSON string.</returns>
-    [CommitBehavior(CommitBehavior::Ignore)]
-    procedure PostAndReconcileJson(Request: Text): Text
-    var
-        RequestObj: JsonObject;
-        ResponseObj: JsonObject;
-        ResponseText: Text;
-    begin
-        if not RequestObj.ReadFrom(Request) then
-            Error(InvalidRequestErr);
-        ResponseObj := this.PostAndReconcile(RequestObj);
-        ResponseObj.WriteTo(ResponseText);
-        exit(ResponseText);
-    end;
-
+    /// the request is hashed CANONICALLY (order-independent — JSON key order and collection order do not
+    /// matter), so a retry with the same content replays; a different payload for the same line is a conflict.</remarks>
     [CommitBehavior(CommitBehavior::Ignore)]
     procedure PostAndReconcile(Request: JsonObject): JsonObject
     var
-        PmtReconPost: Codeunit "MON Pmt Recon Post";
-        PmtReconMatch: Codeunit "MON Pmt Recon Match";
         PmtReconLog: Record "MON Pmt Recon Log";
         BankAccountLedgerEntry: Record "Bank Account Ledger Entry";
         TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary;
+        PmtReconPost: Codeunit "MON Pmt Recon Post";
+        PmtReconMatch: Codeunit "MON Pmt Recon Match";
         PaymentsTok: JsonToken;
         PaymentTok: JsonToken;
         AppliesToTok: JsonToken;

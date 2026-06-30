@@ -19,11 +19,17 @@ permissionset 50207 "MON Pmt Recon API"
         page "MON Bank Acc Recon API" = X,
         // --- This app's data --- (the apply buffer is TableType=Temporary -> no tabledata grant needed)
         tabledata "MON Pmt Recon Log" = RIM,
-        // --- Standard tabledata the operations touch DIRECTLY (no Delete: the flow never deletes these) ---
-        // Gen. Journal Line keeps Delete: the standard posting engine deletes the journal lines after posting.
-        tabledata "Gen. Journal Line" = RIMD,
-        tabledata "Cust. Ledger Entry" = RIM,
-        tabledata "Bank Account Ledger Entry" = RIM,
+        // --- Standard tabledata the operations touch. NOTE: permission completeness is only verifiable in
+        // the real-sandbox smoke test; the S2S account is also expected to hold a standard posting set. ---
+        // The app builds/validates an IN-MEMORY Gen. Journal Line and posts it via Gen. Jnl.-Post Line; it
+        // does not insert or delete journal rows itself, so no Delete is needed.
+        tabledata "Gen. Journal Line" = RIM,
+        // Cust. Ledger Entry / Bank Account Ledger Entry are only READ directly here (Get/SetRange); their
+        // modifications run through the standard code-mediated codeunits (Cust. Entry-Edit, codeunit 375),
+        // so insert/modify are INDIRECT (lowercase) — least privilege on the S2S surface.
+        tabledata "Cust. Ledger Entry" = Rim,
+        tabledata "Bank Account Ledger Entry" = Rim,
+        // Bank Acc. Reconciliation Line is modified DIRECTLY (Modify(true) to fire OnModify), so direct M.
         tabledata "Bank Acc. Reconciliation" = RIM,
         tabledata "Bank Acc. Reconciliation Line" = RIM,
         // G/L Entry is reached only THROUGH the base posting engine (which holds InherentPermissions on it),

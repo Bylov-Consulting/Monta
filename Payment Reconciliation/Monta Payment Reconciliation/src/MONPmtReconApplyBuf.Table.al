@@ -8,6 +8,7 @@ table 50200 "MON Pmt Recon Apply Buf"
     TableType = Temporary;
     Access = Internal;
     Caption = 'MON Pmt Recon Apply Buffer';
+    DataClassification = CustomerContent;
 
     fields
     {
