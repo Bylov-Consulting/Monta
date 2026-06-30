@@ -951,6 +951,153 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
     end;
 
     [Test]
+    procedure PostAndReconcile_ReplayIgnoresKeyOrder()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        BankAccReconciliation: Record "Bank Acc. Reconciliation";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request1: JsonObject;
+        Request2: JsonObject;
+        Response1: JsonObject;
+        Response2: JsonObject;
+        AppliedCustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        ExternalDocNo: Code[35];
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+        StatementAmount: Decimal;
+        Request1Text: Text;
+        Request2Text: Text;
+        BankEntryNo1: Integer;
+        BankEntryNo2: Integer;
+        ResultMatched2: Boolean;
+    begin
+        // [SCENARIO] Slice 15 (order-independent idempotency): a retry that carries the SAME logical content
+        // as the first call but serialises its JSON keys in a DIFFERENT order must be recognised as an
+        // idempotent REPLAY (same result, no second post), NOT rejected as a conflict. The idempotency
+        // fingerprint must be CANONICAL (derived from the semantic values in a fixed order), so JSON key
+        // insertion order cannot change it. One customer / one invoice; no write-offs.
+
+        // [GIVEN] A customer with a posted sales invoice of amount X and its open Cust. Ledger Entry.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), AppliedCustLedgerEntryNo, InvoiceAmount);
+
+        // [GIVEN] A FRESH bank account + journal — a fresh bank account means a simple SetRange+Count on
+        // Bank Account Ledger Entry isolates exactly the entries this test posts (so "exactly one" is sound).
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+
+        // [GIVEN] A standard Bank Acc. Reconciliation with ONE UNMATCHED line whose Statement Amount = X.
+        StatementAmount := InvoiceAmount;
+        LibraryERM.CreateBankAccReconciliation(
+            BankAccReconciliation, BankAccount."No.",
+            BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+        LibraryERM.CreateBankAccReconciliationLn(BankAccReconLine, BankAccReconciliation);
+        BankAccReconLine.Validate("Statement Amount", StatementAmount);
+        BankAccReconLine.Difference := StatementAmount; // unmatched: nothing applied yet
+        BankAccReconLine.Modify(true);
+        StatementNo := BankAccReconLine."Statement No.";
+        StatementLineNo := BankAccReconLine."Statement Line No.";
+
+        // [GIVEN] Guard the starting state so the post-conditions can only be reached by PostAndReconcile.
+        Assert.AreEqual(
+            0, BankAccReconLine."Applied Entries",
+            'Precondition: the reconciliation line must start with no applied entries.');
+
+        // [GIVEN] TWO requests with IDENTICAL logical content but a DIFFERENT JSON key insertion order. The
+        // SAME externalDocumentNo (and every other value) is shared between them, so the ONLY difference is
+        // the order in which keys were added: Request1 uses BuildRequest's normal order; Request2 inserts
+        // payments first, the six header scalars in reverse, the payment's appliesTo before customerNo, and
+        // the apply entry's amount before custLedgerEntryNo. Same logical request, same recon line.
+        ExternalDocNo := NewExternalDocNo();
+        Request1 := BuildRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, ExternalDocNo,
+            Customer."No.", AppliedCustLedgerEntryNo, InvoiceAmount);
+        Request2 := BuildRequestKeyOrderVariant(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, ExternalDocNo,
+            Customer."No.", AppliedCustLedgerEntryNo, InvoiceAmount);
+
+        // [GIVEN] Make the precondition load-bearing: the two requests serialise to DIFFERENT text (different
+        // key order). This is exactly what defeats today's WriteTo-based hash — Request2's serialisation, and
+        // therefore its hash, differs from Request1's, so the second call is wrongly seen as a conflict.
+        Request1.WriteTo(Request1Text);
+        Request2.WriteTo(Request2Text);
+        Assert.AreNotEqual(
+            Request1Text, Request2Text,
+            'Precondition: the two requests must serialise to DIFFERENT text (different JSON key order) for the test to be meaningful.');
+
+        // [WHEN] The request is issued, then RETRIED with the reordered-but-identical body for the SAME recon
+        // line. Note: NO asserterror — slice 15 expects the retry to SUCCEED as a replay. Today the retry
+        // THROWS AlreadyReconciledErr (different WriteTo -> different hash -> conflict), so the un-guarded call
+        // errors here and the test fails -> RED.
+        Response1 := PmtReconService.PostAndReconcile(Request1);
+        Response2 := PmtReconService.PostAndReconcile(Request2);
+
+        BankEntryNo1 := ReadInt(Response1, 'bankAccountLedgerEntryNo');
+        BankEntryNo2 := ReadInt(Response2, 'bankAccountLedgerEntryNo');
+        ResultMatched2 := ReadBool(Response2, 'reconciliationLineMatched');
+
+        // [THEN] The reordered retry is an idempotent REPLAY: it returns the SAME bank ledger entry as the
+        // first call — no second post, no conflict.
+        Assert.AreNotEqual(
+            0, BankEntryNo1,
+            'The first call must return a non-zero Bank Account Ledger Entry No. for the posted receipt.');
+        Assert.AreEqual(
+            BankEntryNo1, BankEntryNo2,
+            'A reordered-key retry must REPLAY: same Bank Account Ledger Entry No. as the first call (not a conflict, not a second post).');
+
+        // [THEN] EXACTLY ONE Bank Account Ledger Entry exists on the (fresh) bank account: the replay posted
+        // nothing new.
+        BankAccLedgerEntry.SetRange("Bank Account No.", BankAccount."No.");
+        Assert.AreEqual(
+            1, BankAccLedgerEntry.Count(),
+            'Exactly one Bank Account Ledger Entry must exist on the bank account (the reordered replay must not post a second).');
+
+        // [THEN] No additional customer payment was posted: exactly ONE Payment Cust. Ledger Entry for the
+        // customer (a second post would create a second payment entry and a second application).
+        Assert.AreEqual(
+            1, CustomerPaymentEntryCount(Customer."No."),
+            'Exactly one customer Payment ledger entry must exist (the invoice is applied by a SINGLE payment, not two).');
+
+        // [THEN] The applied invoice is closed — settled by that single payment application.
+        CustLedgerEntry.Get(AppliedCustLedgerEntryNo);
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        Assert.AreEqual(
+            0, CustLedgerEntry."Remaining Amount",
+            'The applied invoice must be fully paid (Remaining Amount = 0) after the reordered replay.');
+        Assert.IsFalse(
+            CustLedgerEntry.Open,
+            'The applied invoice must be closed (Open = false) — applied exactly once.');
+
+        // [THEN] The reconciliation line is matched exactly once: Applied Entries = 1, Difference = 0 (the
+        // replay must not add a second applied entry).
+        BankAccReconLine.Get(
+            BankAccReconLine."Statement Type"::"Bank Reconciliation",
+            BankAccount."No.", StatementNo, StatementLineNo);
+        Assert.AreEqual(
+            1, BankAccReconLine."Applied Entries",
+            'The reconciliation line must carry exactly one applied bank ledger entry after the reordered replay.');
+        Assert.AreEqual(
+            0, BankAccReconLine.Difference,
+            'The reconciliation line difference must be zero and unchanged by the reordered replay.');
+
+        // [THEN] The replay response still reports the line as matched.
+        Assert.IsTrue(
+            ResultMatched2,
+            'PostAndReconcile must report reconciliationLineMatched = true on the reordered-key replay.');
+    end;
+
+    [Test]
     procedure PostAndReconcile_RejectsNoPayments()
     var
         BankAccount: Record "Bank Account";
@@ -1462,6 +1609,43 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         Request.Add('journalBatchName', JournalBatchName);
         Request.Add('externalDocumentNo', ExternalDocumentNo);
         Request.Add('payments', Payments);
+        exit(Request);
+    end;
+
+    /// <summary>
+    /// Builds the SAME logical single-payment request as <see cref="BuildRequest"/> (identical values for
+    /// every field) but inserts every JSON key in a DIFFERENT order: at the top level payments FIRST then the
+    /// six header scalars in REVERSE of BuildRequest's order; within the payment appliesTo BEFORE customerNo;
+    /// within the apply entry amount BEFORE custLedgerEntryNo. Because JsonObject.WriteTo preserves insertion
+    /// order, this serialises to DIFFERENT text than BuildRequest while carrying the same content — the exact
+    /// shape slice 15 needs to prove the idempotency hash is canonical (order-independent), not WriteTo-based.
+    /// </summary>
+    local procedure BuildRequestKeyOrderVariant(BankAccountNo: Code[20]; StatementNo: Code[20]; StatementLineNo: Integer; JournalTemplateName: Code[10]; JournalBatchName: Code[10]; ExternalDocumentNo: Code[35]; CustomerNo: Code[20]; CustLedgerEntryNo: Integer; Amount: Decimal): JsonObject
+    var
+        Request: JsonObject;
+        Payment: JsonObject;
+        AppliesToEntry: JsonObject;
+        Payments: JsonArray;
+        AppliesTo: JsonArray;
+    begin
+        // Apply entry: amount BEFORE custLedgerEntryNo (BuildRequest adds custLedgerEntryNo first).
+        AppliesToEntry.Add('amount', Amount);
+        AppliesToEntry.Add('custLedgerEntryNo', CustLedgerEntryNo);
+        AppliesTo.Add(AppliesToEntry);
+
+        // Payment: appliesTo BEFORE customerNo (BuildRequest adds customerNo first).
+        Payment.Add('appliesTo', AppliesTo);
+        Payment.Add('customerNo', CustomerNo);
+        Payments.Add(Payment);
+
+        // Header: payments FIRST, then the six header scalars in the REVERSE of BuildRequest's order.
+        Request.Add('payments', Payments);
+        Request.Add('externalDocumentNo', ExternalDocumentNo);
+        Request.Add('journalBatchName', JournalBatchName);
+        Request.Add('journalTemplateName', JournalTemplateName);
+        Request.Add('statementLineNo', StatementLineNo);
+        Request.Add('statementNo', StatementNo);
+        Request.Add('bankAccountNo', BankAccountNo);
         exit(Request);
     end;
 
