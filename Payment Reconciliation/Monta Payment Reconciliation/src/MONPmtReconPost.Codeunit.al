@@ -54,6 +54,7 @@ codeunit 50200 "MON Pmt Recon Post"
     /// <param name="GenJnlBatchName">General journal batch (within the template) used to post the payment.</param>
     /// <param name="ExternalDocumentNo">Optional external document reference stamped on the payment line.</param>
     /// <returns>The Entry No. of the single Bank Account Ledger Entry created by the posting (left open for reconciliation).</returns>
+    [CommitBehavior(CommitBehavior::Ignore)]
     procedure PostCustomerPaymentToBankMulti(CustomerNo: Code[20]; BankAccountNo: Code[20]; AppliesToEntries: Dictionary of [Integer, Decimal]; GenJnlTemplateName: Code[10]; GenJnlBatchName: Code[10]; ExternalDocumentNo: Code[35]): Integer
     var
         GenJournalTemplate: Record "Gen. Journal Template";
@@ -198,6 +199,7 @@ codeunit 50200 "MON Pmt Recon Post"
         Customer.Get(CustomerNo);
         BankAccount.SetLoadFields("No.");
         BankAccount.Get(BankAccountNo);
+        GenJournalBatch.SetLoadFields("Name");
         GenJournalBatch.Get(GenJnlTemplateName, GenJnlBatchName);
 
         // The customer-owns-entry and entry-open guards apply to EVERY target entry.

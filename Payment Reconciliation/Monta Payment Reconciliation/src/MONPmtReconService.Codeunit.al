@@ -45,6 +45,7 @@ codeunit 50202 "MON Pmt Recon Service"
     /// </summary>
     /// <param name="Request">The composite request described above.</param>
     /// <returns>The response described above.</returns>
+    [CommitBehavior(CommitBehavior::Ignore)]
     procedure PostAndReconcile(Request: JsonObject): JsonObject
     var
         PmtReconPost: Codeunit "MON Pmt Recon Post";
@@ -68,25 +69,25 @@ codeunit 50202 "MON Pmt Recon Service"
         BankAccountLedgerEntryNo: Integer;
     begin
         // --- Parse the header scalars (slice 4 assumes the settled happy-path shape) ---
-        BankAccountNo := CopyStr(GetText(Request, 'bankAccountNo'), 1, MaxStrLen(BankAccountNo));
-        StatementNo := CopyStr(GetText(Request, 'statementNo'), 1, MaxStrLen(StatementNo));
-        StatementLineNo := GetInt(Request, 'statementLineNo');
-        JournalTemplateName := CopyStr(GetText(Request, 'journalTemplateName'), 1, MaxStrLen(JournalTemplateName));
-        JournalBatchName := CopyStr(GetText(Request, 'journalBatchName'), 1, MaxStrLen(JournalBatchName));
-        ExternalDocumentNo := CopyStr(GetText(Request, 'externalDocumentNo'), 1, MaxStrLen(ExternalDocumentNo));
+        BankAccountNo := CopyStr(this.GetText(Request, 'bankAccountNo'), 1, MaxStrLen(BankAccountNo));
+        StatementNo := CopyStr(this.GetText(Request, 'statementNo'), 1, MaxStrLen(StatementNo));
+        StatementLineNo := this.GetInt(Request, 'statementLineNo');
+        JournalTemplateName := CopyStr(this.GetText(Request, 'journalTemplateName'), 1, MaxStrLen(JournalTemplateName));
+        JournalBatchName := CopyStr(this.GetText(Request, 'journalBatchName'), 1, MaxStrLen(JournalBatchName));
+        ExternalDocumentNo := CopyStr(this.GetText(Request, 'externalDocumentNo'), 1, MaxStrLen(ExternalDocumentNo));
 
         // --- Parse payments[0] (slice 4: exactly one customer) and its FULL appliesTo set ---
         Request.Get('payments', PaymentsTok);
         PaymentsTok.AsArray().Get(0, PaymentTok);
         PaymentObj := PaymentTok.AsObject();
-        CustomerNo := CopyStr(GetText(PaymentObj, 'customerNo'), 1, MaxStrLen(CustomerNo));
+        CustomerNo := CopyStr(this.GetText(PaymentObj, 'customerNo'), 1, MaxStrLen(CustomerNo));
 
         // Collect EVERY (custLedgerEntryNo -> amount) pair so the one receipt settles all invoices.
         PaymentObj.Get('appliesTo', AppliesToTok);
         foreach AppliesToEntryTok in AppliesToTok.AsArray() do begin
             AppliesToObj := AppliesToEntryTok.AsObject();
-            CustLedgerEntryNo := GetInt(AppliesToObj, 'custLedgerEntryNo');
-            AppliesToEntries.Set(CustLedgerEntryNo, GetDecimal(AppliesToObj, 'amount'));
+            CustLedgerEntryNo := this.GetInt(AppliesToObj, 'custLedgerEntryNo');
+            AppliesToEntries.Set(CustLedgerEntryNo, this.GetDecimal(AppliesToObj, 'amount'));
         end;
 
         // --- Compose post + match in ONE transaction (NO intermediate Commit -> atomic) ---
