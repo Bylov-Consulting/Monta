@@ -179,7 +179,7 @@ codeunit 50202 "MON Pmt Recon Service"
         // Operational success telemetry (custom dimensions). Failures are not caught here — they propagate
         // and are captured by BC's built-in platform error telemetry; a catch wrapper (Codeunit.Run) was
         // rejected because it breaks the test framework's transaction isolation. Verified in the smoke test.
-        this.LogSuccess(BankAccountNo, StatementNo, StatementLineNo, BankAccountLedgerEntryNo);
+        this.LogSuccess(BankAccountNo, StatementNo, StatementLineNo, ExternalDocumentNo, BankAccountLedgerEntryNo);
 
         // --- Build the response per the stable contract ---
         // MatchBankEntryToReconLine either succeeds or raises, so reaching here proves the match
@@ -188,7 +188,7 @@ codeunit 50202 "MON Pmt Recon Service"
     end;
 
     /// <summary>Emits operational success telemetry with the recon-line identity and the bank entry created.</summary>
-    local procedure LogSuccess(BankAccountNo: Code[20]; StatementNo: Code[20]; StatementLineNo: Integer; BankAccountLedgerEntryNo: Integer)
+    local procedure LogSuccess(BankAccountNo: Code[20]; StatementNo: Code[20]; StatementLineNo: Integer; ExternalDocumentNo: Code[35]; BankAccountLedgerEntryNo: Integer)
     var
         TelemetryDims: Dictionary of [Text, Text];
     begin
@@ -197,8 +197,11 @@ codeunit 50202 "MON Pmt Recon Service"
         TelemetryDims.Add('bankAccountNo', BankAccountNo);
         TelemetryDims.Add('statementNo', StatementNo);
         TelemetryDims.Add('statementLineNo', Format(StatementLineNo));
+        TelemetryDims.Add('externalDocumentNo', ExternalDocumentNo);
         TelemetryDims.Add('bankAccountLedgerEntryNo', Format(BankAccountLedgerEntryNo));
-        Session.LogMessage('MON-PR-0001', SuccessTelemetryTxt, Verbosity::Normal, DataClassification::SystemMetadata, TelemetryScope::ExtensionPublisher, TelemetryDims);
+        // OrganizationIdentifiableInformation: bankAccountNo/statementNo/externalDocumentNo are
+        // user-managed organisational codes, not system-internal metadata.
+        Session.LogMessage('MON-PR-0001', SuccessTelemetryTxt, Verbosity::Normal, DataClassification::OrganizationIdentifiableInformation, TelemetryScope::ExtensionPublisher, TelemetryDims);
     end;
 
     /// <summary>
