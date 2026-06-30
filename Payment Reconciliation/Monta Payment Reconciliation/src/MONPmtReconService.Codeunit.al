@@ -64,8 +64,8 @@ codeunit 50202 "MON Pmt Recon Service"
         CustomerNo: Code[20];
         StatementLineNo: Integer;
         CustLedgerEntryNo: Integer;
-        Amount: Decimal;
         BankAccountLedgerEntryNo: Integer;
+        Amount: Decimal;
     begin
         // --- Parse the header scalars (slice 3 assumes the settled happy-path shape) ---
         BankAccountNo := CopyStr(GetText(Request, 'bankAccountNo'), 1, MaxStrLen(BankAccountNo));
@@ -97,6 +97,8 @@ codeunit 50202 "MON Pmt Recon Service"
             BankAccountNo, StatementNo, StatementLineNo, BankAccountLedgerEntryNo);
 
         // --- Build the response per the stable contract ---
+        // MatchBankEntryToReconLine either succeeds or raises, so reaching here proves the match
+        // was applied -> reconciliationLineMatched is unconditionally true on this path.
         Response.Add('bankAccountLedgerEntryNo', BankAccountLedgerEntryNo);
         Response.Add('reconciliationLineMatched', true);
         exit(Response);
