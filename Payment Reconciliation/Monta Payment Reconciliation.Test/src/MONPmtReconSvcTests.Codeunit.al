@@ -818,6 +818,140 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         Assert.ExpectedError('already been reconciled');
     end;
 
+    [Test]
+    procedure PostAndReconcile_FailureAudited()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        NonDirectGLAccount: Record "G/L Account";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        BankAccReconciliation: Record "Bank Acc. Reconciliation";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        MONPmtReconLog: Record "MON Pmt Recon Log";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        AppliedCustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        WriteOffAmount: Decimal;
+        CashAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+    begin
+        // [SCENARIO] Slice 8 (failure audit): when the post/match FAILS, the whole business operation must
+        // roll back (no payment posted, reconciliation line untouched) BUT a Failed "MON Pmt Recon Log" row
+        // must be written that SURVIVES that rollback, so the failure is diagnosable. The reliable failure
+        // trigger is a write-off to a G/L account that does NOT allow direct posting: "Gen. Jnl.-Post Line"
+        // errors MID-DOCUMENT (after parse/validation), so the failure originates inside the real posting —
+        // exactly the path slice 8 must audit. One customer / one invoice / one write-off.
+
+        // [GIVEN] A customer with ONE posted sales invoice of amount X; capture its open Cust. Ledger Entry
+        // No. and remaining amount X.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), AppliedCustLedgerEntryNo, InvoiceAmount);
+
+        // [GIVEN] A FRESH bank account (unique recon-line PK per test, regardless of the committed Failed
+        // row GREEN will write) and a general journal template + batch for the payment.
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+
+        // [GIVEN] A G/L account the agent nominates for the write-off, explicitly set to FORBID direct
+        // posting. A balancing G/L journal line CANNOT post to an account with Direct Posting = false, so
+        // the write-off line makes "Gen. Jnl.-Post Line" error mid-document and the whole post rolls back.
+        CreateNonDirectPostingGLAccount(NonDirectGLAccount);
+
+        // [GIVEN] A small write-off W with 0 < W < X and the CASH actually received = X - W.
+        WriteOffAmount := LibraryRandom.RandDecInRange(10, 50, 2);
+        CashAmount := InvoiceAmount - WriteOffAmount;
+
+        // [GIVEN] A standard Bank Acc. Reconciliation with ONE UNMATCHED line whose Statement Amount is the
+        // CASH (X - W). Difference = X - W, Applied Entries = 0.
+        LibraryERM.CreateBankAccReconciliation(
+            BankAccReconciliation, BankAccount."No.",
+            BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+        LibraryERM.CreateBankAccReconciliationLn(BankAccReconLine, BankAccReconciliation);
+        BankAccReconLine.Validate("Statement Amount", CashAmount);
+        BankAccReconLine.Difference := CashAmount; // unmatched: nothing applied yet
+        BankAccReconLine.Modify(true);
+        StatementNo := BankAccReconLine."Statement No.";
+        StatementLineNo := BankAccReconLine."Statement Line No.";
+
+        // [GIVEN] Guard the starting state so the post-conditions can only be reached by PostAndReconcile.
+        Assert.AreEqual(
+            0, BankAccReconLine."Applied Entries",
+            'Precondition: the reconciliation line must start with no applied entries.');
+        Assert.AreEqual(
+            CashAmount, BankAccReconLine.Difference,
+            'Precondition: the full cash amount (X - W) must be outstanding before the composite call.');
+        Assert.IsFalse(
+            MONPmtReconLog.Get(BankAccount."No.", StatementNo, StatementLineNo),
+            'Precondition: no log row may exist for this fresh reconciliation line before the call.');
+
+        // [WHEN] The agent issues PostAndReconcile with a write-off to the non-direct-posting G/L account.
+        // The call MUST fail: the write-off line cannot post -> "Gen. Jnl.-Post Line" errors mid-document.
+        Request := BuildWriteOffRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer."No.", AppliedCustLedgerEntryNo, InvoiceAmount,
+            NonDirectGLAccount."No.", WriteOffAmount);
+        asserterror PmtReconService.PostAndReconcile(Request);
+
+        // [THEN] A Failed audit row EXISTS for the reconciliation line and SURVIVED the business rollback.
+        // GREEN runs the post in a worker (Codeunit.Run -> auto-rollback on error) then writes this Failed
+        // row + Commit before re-raising, so the row outlives the asserterror rollback. Today there is NO
+        // failure handling: the posting error propagates uncaught and NO row is ever written, so this Get
+        // returns false -> FIRST assertion to fail -> RED. (Falsifiable: a Posted row, or no row, both fail.)
+        Assert.IsTrue(
+            MONPmtReconLog.Get(BankAccount."No.", StatementNo, StatementLineNo),
+            'A MON Pmt Recon Log row must exist for the reconciliation line after a failed post (the failure audit).');
+        Assert.AreEqual(
+            MONPmtReconLog.Status::Failed, MONPmtReconLog.Status,
+            'The surviving audit row must have Status = Failed (the post failed and rolled back).');
+
+        // [THEN] The reconciliation line is UNTOUCHED: the business post rolled back, so nothing was applied.
+        // (Re-Get to read the persisted state.) Today the error propagates BEFORE the post commits anything,
+        // so these also hold today — they pin that GREEN's worker rollback leaves the line pristine.
+        BankAccReconLine.Get(
+            BankAccReconLine."Statement Type"::"Bank Reconciliation",
+            BankAccount."No.", StatementNo, StatementLineNo);
+        Assert.AreEqual(
+            0, BankAccReconLine."Applied Entries",
+            'The reconciliation line must have NO applied entries after the failed post (whole operation rolled back).');
+        Assert.AreEqual(
+            CashAmount, BankAccReconLine.Difference,
+            'The reconciliation line difference must remain the original Statement Amount (nothing was applied).');
+
+        // [THEN] The invoice CLE is still OPEN — no payment was applied.
+        CustLedgerEntry.Get(AppliedCustLedgerEntryNo);
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        Assert.IsTrue(
+            CustLedgerEntry.Open,
+            'The applied invoice must remain open after the failed post (no payment was applied).');
+
+        // [CLEANUP] GREEN commits the Failed row, so test isolation will NOT roll it back. Delete it here so
+        // it cannot leak into other tests. (Harmless under today's RED: no row exists, so the Get is false.)
+        if MONPmtReconLog.Get(BankAccount."No.", StatementNo, StatementLineNo) then
+            MONPmtReconLog.Delete();
+    end;
+
+    /// <summary>
+    /// Creates a G/L Account that FORBIDS direct posting (Direct Posting = false) and verifies the flag
+    /// actually stuck. Posting a balancing G/L journal line to such an account makes "Gen. Jnl.-Post Line"
+    /// error mid-document — the reliable mid-post failure trigger for the slice-8 failure-audit scenario.
+    /// </summary>
+    local procedure CreateNonDirectPostingGLAccount(var GLAccount: Record "G/L Account")
+    begin
+        LibraryERM.CreateGLAccount(GLAccount);
+        GLAccount.Validate("Direct Posting", false);
+        GLAccount.Modify(true);
+        Assert.IsFalse(
+            GLAccount."Direct Posting",
+            'Arrange: the write-off G/L account must FORBID direct posting so the post fails mid-document.');
+    end;
+
     /// <summary>
     /// Number of POSTED customer Payment ledger entries for the given customer. The customer is created
     /// fresh per test, so counting all its Payment-type Cust. Ledger Entries isolates the payment(s) this
