@@ -17,14 +17,16 @@ permissionset 50207 "MON Pmt Recon API"
         codeunit "MON Pmt Recon Service" = X,
         page "MON Bank Recon Line API" = X,
         page "MON Bank Acc Recon API" = X,
-        // --- This app's data ---
+        // --- This app's data --- (the apply buffer is TableType=Temporary -> no tabledata grant needed)
         tabledata "MON Pmt Recon Log" = RIM,
-        tabledata "MON Pmt Recon Apply Buf" = RIMD,
-        // --- Standard tabledata the operations read/write ---
+        // --- Standard tabledata the operations touch DIRECTLY (no Delete: the flow never deletes these) ---
+        // Gen. Journal Line keeps Delete: the standard posting engine deletes the journal lines after posting.
         tabledata "Gen. Journal Line" = RIMD,
-        tabledata "Cust. Ledger Entry" = RIMD,
-        tabledata "Bank Account Ledger Entry" = RIMD,
-        tabledata "Bank Acc. Reconciliation" = RIMD,
-        tabledata "Bank Acc. Reconciliation Line" = RIMD,
-        tabledata "G/L Entry" = RIM;
+        tabledata "Cust. Ledger Entry" = RIM,
+        tabledata "Bank Account Ledger Entry" = RIM,
+        tabledata "Bank Acc. Reconciliation" = RIM,
+        tabledata "Bank Acc. Reconciliation Line" = RIM,
+        // G/L Entry is reached only THROUGH the base posting engine (which holds InherentPermissions on it),
+        // never directly by this app -> indirect (lowercase) keeps the S2S surface minimal.
+        tabledata "G/L Entry" = rim;
 }
