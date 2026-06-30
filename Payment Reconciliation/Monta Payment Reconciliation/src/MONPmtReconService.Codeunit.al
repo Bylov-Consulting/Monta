@@ -47,12 +47,85 @@ codeunit 50202 "MON Pmt Recon Service"
     /// <returns>The response described above.</returns>
     procedure PostAndReconcile(Request: JsonObject): JsonObject
     var
+        PmtReconPost: Codeunit "MON Pmt Recon Post";
+        PmtReconMatch: Codeunit "MON Pmt Recon Match";
         Response: JsonObject;
+        PaymentsTok: JsonToken;
+        PaymentTok: JsonToken;
+        AppliesToTok: JsonToken;
+        AppliesToEntryTok: JsonToken;
+        PaymentObj: JsonObject;
+        AppliesToObj: JsonObject;
+        BankAccountNo: Code[20];
+        StatementNo: Code[20];
+        JournalTemplateName: Code[10];
+        JournalBatchName: Code[10];
+        ExternalDocumentNo: Code[35];
+        CustomerNo: Code[20];
+        StatementLineNo: Integer;
+        CustLedgerEntryNo: Integer;
+        Amount: Decimal;
+        BankAccountLedgerEntryNo: Integer;
     begin
-        // RED stub — performs NO posting and NO matching. Returns the zeroed contract so callers and
-        // tests can read the stable keys, but the composite behaviour is unimplemented (GREEN's job).
-        Response.Add('bankAccountLedgerEntryNo', 0);
-        Response.Add('reconciliationLineMatched', false);
+        // --- Parse the header scalars (slice 3 assumes the settled happy-path shape) ---
+        BankAccountNo := CopyStr(GetText(Request, 'bankAccountNo'), 1, MaxStrLen(BankAccountNo));
+        StatementNo := CopyStr(GetText(Request, 'statementNo'), 1, MaxStrLen(StatementNo));
+        StatementLineNo := GetInt(Request, 'statementLineNo');
+        JournalTemplateName := CopyStr(GetText(Request, 'journalTemplateName'), 1, MaxStrLen(JournalTemplateName));
+        JournalBatchName := CopyStr(GetText(Request, 'journalBatchName'), 1, MaxStrLen(JournalBatchName));
+        ExternalDocumentNo := CopyStr(GetText(Request, 'externalDocumentNo'), 1, MaxStrLen(ExternalDocumentNo));
+
+        // --- Parse payments[0] and its appliesTo[0] (slice 3: exactly one of each) ---
+        Request.Get('payments', PaymentsTok);
+        PaymentsTok.AsArray().Get(0, PaymentTok);
+        PaymentObj := PaymentTok.AsObject();
+        CustomerNo := CopyStr(GetText(PaymentObj, 'customerNo'), 1, MaxStrLen(CustomerNo));
+
+        PaymentObj.Get('appliesTo', AppliesToTok);
+        AppliesToTok.AsArray().Get(0, AppliesToEntryTok);
+        AppliesToObj := AppliesToEntryTok.AsObject();
+        CustLedgerEntryNo := GetInt(AppliesToObj, 'custLedgerEntryNo');
+        Amount := GetDecimal(AppliesToObj, 'amount');
+
+        // --- Compose post + match in ONE transaction (NO intermediate Commit -> atomic) ---
+        BankAccountLedgerEntryNo :=
+            PmtReconPost.PostCustomerPaymentToBank(
+                CustomerNo, BankAccountNo, Amount, CustLedgerEntryNo,
+                JournalTemplateName, JournalBatchName, ExternalDocumentNo);
+
+        PmtReconMatch.MatchBankEntryToReconLine(
+            BankAccountNo, StatementNo, StatementLineNo, BankAccountLedgerEntryNo);
+
+        // --- Build the response per the stable contract ---
+        Response.Add('bankAccountLedgerEntryNo', BankAccountLedgerEntryNo);
+        Response.Add('reconciliationLineMatched', true);
         exit(Response);
+    end;
+
+    local procedure GetText(Obj: JsonObject; KeyName: Text): Text
+    var
+        Token: JsonToken;
+    begin
+        if Obj.Get(KeyName, Token) then
+            exit(Token.AsValue().AsText());
+        exit('');
+    end;
+
+    local procedure GetInt(Obj: JsonObject; KeyName: Text): Integer
+    var
+        Token: JsonToken;
+    begin
+        if Obj.Get(KeyName, Token) then
+            exit(Token.AsValue().AsInteger());
+        exit(0);
+    end;
+
+    local procedure GetDecimal(Obj: JsonObject; KeyName: Text): Decimal
+    var
+        Token: JsonToken;
+    begin
+        if Obj.Get(KeyName, Token) then
+            exit(Token.AsValue().AsDecimal());
+        exit(0);
     end;
 }
