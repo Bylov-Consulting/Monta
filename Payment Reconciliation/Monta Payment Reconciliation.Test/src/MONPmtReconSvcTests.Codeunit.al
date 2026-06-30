@@ -146,6 +146,217 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
             'PostAndReconcile must report reconciliationLineMatched = true once the line is matched.');
     end;
 
+    [Test]
+    procedure PostAndReconcile_MultiInvoice()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        BankAccReconciliation: Record "Bank Acc. Reconciliation";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Response: JsonObject;
+        CustLedgerEntryNoA: Integer;
+        CustLedgerEntryNoB: Integer;
+        AmountA: Decimal;
+        AmountB: Decimal;
+        TotalAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+        ResultBankEntryNo: Integer;
+        ResultMatched: Boolean;
+    begin
+        // [SCENARIO] Slice 4: ONE incoming payment from ONE customer settles MULTIPLE open invoices at
+        // once. Each target Cust. Ledger Entry is stamped with the same Applies-to ID + its Amount to
+        // Apply, and exactly ONE Bank Account Ledger Entry is created for the TOTAL (A + B), so the
+        // reconciliation line stays a 1:1 match to that single bank entry. One customer, two invoices,
+        // no write-offs, no multi-customer.
+
+        // [GIVEN] One customer with TWO posted sales invoices of distinct known amounts A and B
+        // (distinct unit-price ranges guarantee A <> B). Capture both open Cust. Ledger Entry Nos.
+        // and remaining amounts.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 500, 2), CustLedgerEntryNoA, AmountA);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(600, 1000, 2), CustLedgerEntryNoB, AmountB);
+        TotalAmount := AmountA + AmountB;
+
+        // [GIVEN] Sanity: the two invoices are distinct, both open, with distinct positive amounts so
+        // a single-appliesTo regression (settling only A) is observable.
+        Assert.AreNotEqual(
+            CustLedgerEntryNoA, CustLedgerEntryNoB,
+            'Precondition: the two invoices must be distinct customer ledger entries.');
+        Assert.AreNotEqual(
+            AmountA, AmountB,
+            'Precondition: the two invoice amounts must differ so a partial (A-only) settlement is detectable.');
+
+        // [GIVEN] A bank account and a general journal template + batch for the payment.
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+
+        // [GIVEN] A standard Bank Acc. Reconciliation with ONE UNMATCHED line whose Statement Amount is
+        // the TOTAL of both invoices (A + B): a single receipt for the whole payment. Difference = A+B,
+        // Applied Entries = 0.
+        LibraryERM.CreateBankAccReconciliation(
+            BankAccReconciliation, BankAccount."No.",
+            BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+        LibraryERM.CreateBankAccReconciliationLn(BankAccReconLine, BankAccReconciliation);
+        BankAccReconLine.Validate("Statement Amount", TotalAmount);
+        BankAccReconLine.Difference := TotalAmount; // unmatched: nothing applied yet
+        BankAccReconLine.Modify(true);
+        StatementNo := BankAccReconLine."Statement No.";
+        StatementLineNo := BankAccReconLine."Statement Line No.";
+
+        // [GIVEN] Guard the starting state so the post-conditions can only be reached by PostAndReconcile.
+        Assert.AreEqual(
+            0, BankAccReconLine."Applied Entries",
+            'Precondition: the reconciliation line must start with no applied entries.');
+        Assert.AreEqual(
+            TotalAmount, BankAccReconLine.Difference,
+            'Precondition: the full total (A + B) must be outstanding before the composite call.');
+
+        // [WHEN] The agent issues a single PostAndReconcile call whose payments[0].appliesTo carries TWO
+        // entries: {A's CLE, A} and {B's CLE, B}.
+        Request := BuildMultiInvoiceRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer."No.", CustLedgerEntryNoA, AmountA, CustLedgerEntryNoB, AmountB);
+        Response := PmtReconService.PostAndReconcile(Request);
+
+        ResultBankEntryNo := ReadInt(Response, 'bankAccountLedgerEntryNo');
+        ResultMatched := ReadBool(Response, 'reconciliationLineMatched');
+
+        // [THEN] The response names a real, open Bank Account Ledger Entry on the bank.
+        Assert.AreNotEqual(
+            0, ResultBankEntryNo,
+            'PostAndReconcile must return a non-zero Bank Account Ledger Entry No. for the posted receipt.');
+        Assert.IsTrue(
+            BankAccLedgerEntry.Get(ResultBankEntryNo),
+            'A Bank Account Ledger Entry with the returned No. must exist (the payment must have posted).');
+        Assert.AreEqual(
+            BankAccount."No.", BankAccLedgerEntry."Bank Account No.",
+            'The created Bank Account Ledger Entry must belong to the payment bank account.');
+
+        // [THEN] EXACTLY ONE bank entry for the WHOLE payment: |Amount| = A + B. Today the service reads
+        // only appliesTo[0] and posts A, so |Amount| = A <> A+B -> this is the FIRST assertion to fail.
+        Assert.AreEqual(
+            TotalAmount, Abs(BankAccLedgerEntry.Amount),
+            'The single Bank Account Ledger Entry amount must equal the TOTAL of both invoices (A + B).');
+        Assert.IsTrue(
+            BankAccLedgerEntry.Open,
+            'The Bank Account Ledger Entry must remain open (matched, not yet statement-posted).');
+
+        // [THEN] BOTH invoices are fully closed — re-Get + CalcFields each. Today invoice B is never
+        // applied (only appliesTo[0] is read), so it stays open -> this fails for B.
+        CustLedgerEntry.Get(CustLedgerEntryNoA);
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        Assert.AreEqual(
+            0, CustLedgerEntry."Remaining Amount",
+            'Invoice A must be fully paid (Remaining Amount = 0) after the multi-invoice call.');
+        Assert.IsFalse(
+            CustLedgerEntry.Open,
+            'Invoice A must be closed (Open = false) after the multi-invoice call.');
+
+        CustLedgerEntry.Get(CustLedgerEntryNoB);
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        Assert.AreEqual(
+            0, CustLedgerEntry."Remaining Amount",
+            'Invoice B must be fully paid (Remaining Amount = 0) after the multi-invoice call.');
+        Assert.IsFalse(
+            CustLedgerEntry.Open,
+            'Invoice B must be closed (Open = false) after the multi-invoice call.');
+
+        // [THEN] The reconciliation line is fully matched to the ONE bank entry: Applied Entries = 1,
+        // Applied Amount = A+B, Difference = 0. Today Applied Amount = A and Difference = B <> 0.
+        BankAccReconLine.Get(
+            BankAccReconLine."Statement Type"::"Bank Reconciliation",
+            BankAccount."No.", StatementNo, StatementLineNo);
+        Assert.AreEqual(
+            1, BankAccReconLine."Applied Entries",
+            'The reconciliation line must have exactly one applied bank ledger entry (1:1 with the total receipt).');
+        Assert.AreEqual(
+            TotalAmount, BankAccReconLine."Applied Amount",
+            'The applied amount must equal the TOTAL statement amount (A + B).');
+        Assert.AreEqual(
+            0, BankAccReconLine.Difference,
+            'The reconciliation line difference must be zero once the total receipt is matched.');
+
+        // [THEN] The response explicitly reports the line as matched.
+        Assert.IsTrue(
+            ResultMatched,
+            'PostAndReconcile must report reconciliationLineMatched = true once the line is matched.');
+    end;
+
+    /// <summary>
+    /// Posts a sales invoice of ONE item line at the given unit price for an existing customer and
+    /// returns the resulting open Cust. Ledger Entry No. and its remaining amount (the settle amount,
+    /// VAT included). Used to arrange the multiple distinct invoices of the slice-4 scenario.
+    /// </summary>
+    local procedure CreatePostedInvoiceForCustomer(CustomerNo: Code[20]; UnitPrice: Decimal; var CustLedgerEntryNo: Integer; var RemainingAmount: Decimal)
+    var
+        Item: Record Item;
+        SalesHeader: Record "Sales Header";
+        SalesLine: Record "Sales Line";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        PostedInvoiceNo: Code[20];
+    begin
+        LibraryInventory.CreateItem(Item);
+        LibrarySales.CreateSalesHeader(SalesHeader, SalesHeader."Document Type"::Invoice, CustomerNo);
+        LibrarySales.CreateSalesLine(SalesLine, SalesHeader, SalesLine.Type::Item, Item."No.", 1);
+        SalesLine.Validate("Unit Price", UnitPrice);
+        SalesLine.Modify(true);
+        PostedInvoiceNo := LibrarySales.PostSalesDocument(SalesHeader, true, true);
+
+        CustLedgerEntry.SetRange("Document Type", CustLedgerEntry."Document Type"::Invoice);
+        CustLedgerEntry.SetRange("Document No.", PostedInvoiceNo);
+        CustLedgerEntry.FindFirst();
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        CustLedgerEntryNo := CustLedgerEntry."Entry No.";
+        RemainingAmount := CustLedgerEntry."Remaining Amount";
+    end;
+
+    /// <summary>
+    /// Builds a slice-4 PostAndReconcile request: ONE payments entry whose appliesTo carries TWO
+    /// entries (one customer, two invoices). Mirrors the stable JSON contract documented on codeunit
+    /// "MON Pmt Recon Service".
+    /// </summary>
+    local procedure BuildMultiInvoiceRequest(BankAccountNo: Code[20]; StatementNo: Code[20]; StatementLineNo: Integer; JournalTemplateName: Code[10]; JournalBatchName: Code[10]; ExternalDocumentNo: Code[35]; CustomerNo: Code[20]; CustLedgerEntryNoA: Integer; AmountA: Decimal; CustLedgerEntryNoB: Integer; AmountB: Decimal): JsonObject
+    var
+        Request: JsonObject;
+        Payment: JsonObject;
+        AppliesToEntryA: JsonObject;
+        AppliesToEntryB: JsonObject;
+        Payments: JsonArray;
+        AppliesTo: JsonArray;
+    begin
+        AppliesToEntryA.Add('custLedgerEntryNo', CustLedgerEntryNoA);
+        AppliesToEntryA.Add('amount', AmountA);
+        AppliesTo.Add(AppliesToEntryA);
+
+        AppliesToEntryB.Add('custLedgerEntryNo', CustLedgerEntryNoB);
+        AppliesToEntryB.Add('amount', AmountB);
+        AppliesTo.Add(AppliesToEntryB);
+
+        Payment.Add('customerNo', CustomerNo);
+        Payment.Add('appliesTo', AppliesTo);
+        Payments.Add(Payment);
+
+        Request.Add('bankAccountNo', BankAccountNo);
+        Request.Add('statementNo', StatementNo);
+        Request.Add('statementLineNo', StatementLineNo);
+        Request.Add('journalTemplateName', JournalTemplateName);
+        Request.Add('journalBatchName', JournalBatchName);
+        Request.Add('externalDocumentNo', ExternalDocumentNo);
+        Request.Add('payments', Payments);
+        exit(Request);
+    end;
+
     /// <summary>
     /// Builds the slice-3 PostAndReconcile request: exactly one payments entry with exactly one
     /// appliesTo entry. Mirrors the stable JSON contract documented on codeunit "MON Pmt Recon Service".
