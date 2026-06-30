@@ -133,8 +133,9 @@ codeunit 50202 "MON Pmt Recon Service"
         // agent retry that reads the prior call's COMMITTED row; an in-transaction repeat reading the prior
         // uncommitted row is a secondary benefit. LockTable serializes concurrent first-time calls for the
         // same line so the loser surfaces the designed conflict error, not a raw duplicate-key error from the
-        // Insert below. NOTE: the hash is over the serialized request, so a retry must resend a byte-identical
-        // JSON body to replay (see <remarks>); an order-independent canonical hash would relax this. ---
+        // Insert below. NOTE: the hash is CANONICAL (over the request's semantic content in a fixed,
+        // sorted order — see ComputeRequestHash), so a retry replays as long as it carries the same logical
+        // content, even if its JSON keys/elements are serialized in a different order. ---
         RequestHash := this.ComputeRequestHash(Request);
         PmtReconLog.LockTable();
         if PmtReconLog.Get(BankAccountNo, StatementNo, StatementLineNo) then
@@ -315,19 +316,127 @@ codeunit 50202 "MON Pmt Recon Service"
     end;
 
     /// <summary>
-    /// Stable SHA256 hex digest of the WHOLE request (header scalars + payments), used as the idempotency
-    /// fingerprint. The same JsonObject serialises to the same text, so an identical request hashes equal
-    /// (replay), while any change to customer / invoice / amount / etc. changes the text and therefore the
-    /// hash (conflict). Standard System Application hashing — no external dependency.
+    /// Stable SHA256 hex digest of the request's SEMANTIC content, used as the idempotency fingerprint.
+    /// Unlike a raw WriteTo serialisation (which is sensitive to JSON key/element insertion order), this
+    /// hashes a CANONICAL STRING built from the parsed/typed values in a FIXED, deterministic order with
+    /// the payment / appliesTo / writeOff collections SORTED — so two requests with identical logical
+    /// content hash EQUAL regardless of key or element order (replay), while any change to a value
+    /// (customer / invoice / amount / etc.) changes the canonical string and therefore the hash (conflict).
+    /// Standard System Application hashing — no external dependency.
     /// </summary>
     local procedure ComputeRequestHash(Request: JsonObject): Code[64]
     var
         CryptographyManagement: Codeunit "Cryptography Management";
         HashAlgorithmType: Option MD5,SHA1,SHA256,SHA384,SHA512;
-        RequestText: Text;
+        CanonicalText: Text;
     begin
-        Request.WriteTo(RequestText);
-        exit(CopyStr(CryptographyManagement.GenerateHash(RequestText, HashAlgorithmType::SHA256), 1, 64));
+        CanonicalText := this.BuildCanonicalRequest(Request);
+        exit(CopyStr(CryptographyManagement.GenerateHash(CanonicalText, HashAlgorithmType::SHA256), 1, 64));
+    end;
+
+    /// <summary>
+    /// Builds the order-independent canonical string the idempotency hash is taken over. Header scalars are
+    /// emitted in a FIXED field order (typed, so '1'/'01'/whitespace and decimal rendering normalise); the
+    /// payments are each canonicalised then SORTED so payment order is irrelevant. Delimiters ('|' between
+    /// fields, '~' between records) cannot collide with the code/decimal data they separate.
+    /// </summary>
+    local procedure BuildCanonicalRequest(Request: JsonObject): Text
+    var
+        PaymentsTok: JsonToken;
+        PaymentTok: JsonToken;
+        PaymentCanonicals: List of [Text];
+        PaymentCanonical: Text;
+        HeaderSegment: Text;
+        PaymentsSegment: Text;
+    begin
+        HeaderSegment :=
+            this.GetText(Request, 'bankAccountNo') + '|' +
+            this.GetText(Request, 'statementNo') + '|' +
+            Format(this.GetInt(Request, 'statementLineNo')) + '|' +
+            this.GetText(Request, 'journalTemplateName') + '|' +
+            this.GetText(Request, 'journalBatchName') + '|' +
+            this.GetText(Request, 'externalDocumentNo');
+
+        if Request.Get('payments', PaymentsTok) then
+            foreach PaymentTok in PaymentsTok.AsArray() do
+                PaymentCanonicals.Add(this.BuildCanonicalPayment(PaymentTok.AsObject()));
+        this.SortTextList(PaymentCanonicals);
+        foreach PaymentCanonical in PaymentCanonicals do
+            PaymentsSegment += PaymentCanonical + '~';
+
+        exit(HeaderSegment + '~~' + PaymentsSegment);
+    end;
+
+    /// <summary>
+    /// Canonical sub-string for ONE payment: customerNo, then its appliesTo entries (custLedgerEntryNo:amount)
+    /// SORTED, then its writeOff entries (glAccountNo:amount) SORTED. Sorting both collections makes element
+    /// order within a payment irrelevant; amounts use the invariant Format(.., 0, 9) so decimal rendering is
+    /// stable. The 'A'/'W' section markers keep an appliesTo entry from ever aliasing a writeOff entry.
+    /// </summary>
+    local procedure BuildCanonicalPayment(PaymentObj: JsonObject): Text
+    var
+        AppliesToTok: JsonToken;
+        WriteOffTok: JsonToken;
+        EntryTok: JsonToken;
+        EntryObj: JsonObject;
+        AppliesEntries: List of [Text];
+        WriteOffEntries: List of [Text];
+        EntryText: Text;
+        Result: Text;
+    begin
+        Result := this.GetText(PaymentObj, 'customerNo');
+
+        if PaymentObj.Get('appliesTo', AppliesToTok) then
+            foreach EntryTok in AppliesToTok.AsArray() do begin
+                EntryObj := EntryTok.AsObject();
+                AppliesEntries.Add(
+                    Format(this.GetInt(EntryObj, 'custLedgerEntryNo')) + ':' +
+                    Format(this.GetDecimal(EntryObj, 'amount'), 0, 9));
+            end;
+        this.SortTextList(AppliesEntries);
+        Result += '|A';
+        foreach EntryText in AppliesEntries do
+            Result += '|' + EntryText;
+
+        if PaymentObj.Get('writeOff', WriteOffTok) then
+            foreach EntryTok in WriteOffTok.AsArray() do begin
+                EntryObj := EntryTok.AsObject();
+                WriteOffEntries.Add(
+                    this.GetText(EntryObj, 'glAccountNo') + ':' +
+                    Format(this.GetDecimal(EntryObj, 'amount'), 0, 9));
+            end;
+        this.SortTextList(WriteOffEntries);
+        Result += '|W';
+        foreach EntryText in WriteOffEntries do
+            Result += '|' + EntryText;
+
+        exit(Result);
+    end;
+
+    /// <summary>
+    /// Deterministic in-place ascending sort of a List of [Text] (AL's List has no built-in Sort). Simple
+    /// insertion sort: stable and fully deterministic, so an identical multiset of entries always yields the
+    /// identical ordered sequence — which is what makes the canonical string order-independent.
+    /// </summary>
+    local procedure SortTextList(var Items: List of [Text])
+    var
+        Sorted: List of [Text];
+        Item: Text;
+        Inserted: Boolean;
+        Index: Integer;
+    begin
+        foreach Item in Items do begin
+            Inserted := false;
+            for Index := 1 to Sorted.Count() do
+                if Item < Sorted.Get(Index) then begin
+                    Sorted.Insert(Index, Item);
+                    Inserted := true;
+                    break;
+                end;
+            if not Inserted then
+                Sorted.Add(Item);
+        end;
+        Items := Sorted;
     end;
 
     local procedure GetText(Obj: JsonObject; KeyName: Text): Text
