@@ -25,3 +25,4 @@ cache_*
 .claude/settings.local.json
 .dev/
 .artifacts/
+.bc-workflows/

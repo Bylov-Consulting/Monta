@@ -89,4 +89,102 @@ codeunit 50300 "MON Pmt Recon Post Tests"
             CustLedgerEntry.Open,
             'The applied invoice must be closed (Open = false) after the payment is applied.');
     end;
+
+    [Test]
+    procedure PostToClosedInvoice_IsRejected()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        PmtReconPost: Codeunit "MON Pmt Recon Post";
+        CustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+    begin
+        // [SCENARIO] A payment applied to a customer ledger entry that is already closed (fully
+        // settled by an earlier payment) must be rejected — the posting must not settle the same
+        // invoice twice.
+
+        // [GIVEN] A customer with a posted invoice, settled in full by a first payment (this closes
+        // the invoice's customer ledger entry).
+        CreateCustomerWithPostedInvoice(Customer, CustLedgerEntryNo, InvoiceAmount);
+        CreatePaymentInfrastructure(BankAccount, GenJournalTemplate, GenJournalBatch);
+        PmtReconPost.PostCustomerPaymentToBank(
+            Customer."No.", BankAccount."No.", InvoiceAmount, CustLedgerEntryNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+
+        // [WHEN] A second payment is posted against that now-closed entry
+        asserterror PmtReconPost.PostCustomerPaymentToBank(
+            Customer."No.", BankAccount."No.", InvoiceAmount, CustLedgerEntryNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+
+        // [THEN] It is rejected with the closed-entry guard message
+        Assert.ExpectedError('is closed and cannot be settled by this payment');
+    end;
+
+    [Test]
+    procedure PostCrossCustomerEntry_IsRejected()
+    var
+        CustomerA: Record Customer;
+        CustomerB: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        PmtReconPost: Codeunit "MON Pmt Recon Post";
+        CustomerBEntryNo: Integer;
+        InvoiceAmountB: Decimal;
+    begin
+        // [SCENARIO] A payment for customer A that is applied to customer B's open ledger entry must
+        // be rejected — an entry may only be settled by a payment from its own customer.
+
+        // [GIVEN] Customer A (the payer) and Customer B with an open posted invoice
+        LibrarySales.CreateCustomer(CustomerA);
+        CreateCustomerWithPostedInvoice(CustomerB, CustomerBEntryNo, InvoiceAmountB);
+        CreatePaymentInfrastructure(BankAccount, GenJournalTemplate, GenJournalBatch);
+
+        // [WHEN] Customer A pays, but the payment is applied to Customer B's open entry
+        asserterror PmtReconPost.PostCustomerPaymentToBank(
+            CustomerA."No.", BankAccount."No.", InvoiceAmountB, CustomerBEntryNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+
+        // [THEN] It is rejected with the cross-customer guard message
+        Assert.ExpectedError('does not belong to customer');
+    end;
+
+    local procedure CreateCustomerWithPostedInvoice(var Customer: Record Customer; var CustLedgerEntryNo: Integer; var InvoiceAmount: Decimal)
+    var
+        Item: Record Item;
+        SalesHeader: Record "Sales Header";
+        SalesLine: Record "Sales Line";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        PostedInvoiceNo: Code[20];
+    begin
+        // Mirrors the happy-path arrange: a customer with one open posted sales invoice.
+        LibrarySales.CreateCustomer(Customer);
+        LibraryInventory.CreateItem(Item);
+        LibrarySales.CreateSalesHeader(SalesHeader, SalesHeader."Document Type"::Invoice, Customer."No.");
+        LibrarySales.CreateSalesLine(SalesLine, SalesHeader, SalesLine.Type::Item, Item."No.", 1);
+        SalesLine.Validate("Unit Price", LibraryRandom.RandDecInRange(100, 1000, 2));
+        SalesLine.Modify(true);
+        PostedInvoiceNo := LibrarySales.PostSalesDocument(SalesHeader, true, true);
+
+        CustLedgerEntry.SetRange("Document Type", CustLedgerEntry."Document Type"::Invoice);
+        CustLedgerEntry.SetRange("Document No.", PostedInvoiceNo);
+        CustLedgerEntry.FindFirst();
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        CustLedgerEntryNo := CustLedgerEntry."Entry No.";
+        InvoiceAmount := CustLedgerEntry."Remaining Amount";
+    end;
+
+    local procedure CreatePaymentInfrastructure(var BankAccount: Record "Bank Account"; var GenJournalTemplate: Record "Gen. Journal Template"; var GenJournalBatch: Record "Gen. Journal Batch")
+    begin
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+    end;
+
+    local procedure NewExternalDocNo(): Code[35]
+    begin
+        exit(CopyStr('MON-' + Format(LibraryRandom.RandIntInRange(100000, 999999)), 1, 35));
+    end;
 }
