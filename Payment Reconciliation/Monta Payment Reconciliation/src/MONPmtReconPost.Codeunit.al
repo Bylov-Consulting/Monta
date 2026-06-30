@@ -27,6 +27,7 @@ codeunit 50200 "MON Pmt Recon Post"
     /// <param name="GenJnlBatchName">General journal batch (within the template) used to post the payment.</param>
     /// <param name="ExternalDocumentNo">Optional external document reference stamped on the payment line.</param>
     /// <returns>The Entry No. of the Bank Account Ledger Entry created by the posting (left open for reconciliation).</returns>
+    [CommitBehavior(CommitBehavior::Ignore)]
     procedure PostCustomerPaymentToBank(CustomerNo: Code[20]; BankAccountNo: Code[20]; PaymentAmount: Decimal; AppliesToCustLedgerEntryNo: Integer; GenJnlTemplateName: Code[10]; GenJnlBatchName: Code[10]; ExternalDocumentNo: Code[35]): Integer
     var
         AppliesToEntries: Dictionary of [Integer, Decimal];
@@ -58,7 +59,7 @@ codeunit 50200 "MON Pmt Recon Post"
     [CommitBehavior(CommitBehavior::Ignore)]
     procedure PostCustomerPaymentToBankMulti(CustomerNo: Code[20]; BankAccountNo: Code[20]; AppliesToEntries: Dictionary of [Integer, Decimal]; GenJnlTemplateName: Code[10]; GenJnlBatchName: Code[10]; ExternalDocumentNo: Code[35]): Integer
     var
-        ApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary;
+        TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary;
         EntryNo: Integer;
         BufLineNo: Integer;
     begin
@@ -67,17 +68,17 @@ codeunit 50200 "MON Pmt Recon Post"
         // customer payment line for them all.
         foreach EntryNo in AppliesToEntries.Keys do begin
             BufLineNo += 1;
-            ApplyBuffer.Init();
-            ApplyBuffer."Entry No." := BufLineNo;
-            ApplyBuffer."Customer No." := CustomerNo;
-            ApplyBuffer."Cust. Ledger Entry No." := EntryNo;
-            ApplyBuffer."Amount to Apply" := AppliesToEntries.Get(EntryNo);
-            ApplyBuffer.Insert();
+            TempApplyBuffer.Init();
+            TempApplyBuffer."Entry No." := BufLineNo;
+            TempApplyBuffer."Customer No." := CustomerNo;
+            TempApplyBuffer."Cust. Ledger Entry No." := EntryNo;
+            TempApplyBuffer."Amount to Apply" := AppliesToEntries.Get(EntryNo);
+            TempApplyBuffer.Insert();
         end;
 
         exit(
             this.PostCustomerPaymentsToBank(
-                ApplyBuffer, BankAccountNo, GenJnlTemplateName, GenJnlBatchName, ExternalDocumentNo));
+                TempApplyBuffer, BankAccountNo, GenJnlTemplateName, GenJnlBatchName, ExternalDocumentNo));
     end;
 
     /// <summary>
@@ -98,14 +99,14 @@ codeunit 50200 "MON Pmt Recon Post"
     /// transaction; the standard consistency check fires only at the outer commit, by which point the
     /// document is balanced.
     /// </summary>
-    /// <param name="ApplyBuffer">Temporary buffer with one row per (Customer No., Cust. Ledger Entry No., Amount to Apply). Each amount must be > 0 and each entry must be open and belong to its row's customer.</param>
+    /// <param name="TempApplyBuffer">Temporary buffer with one row per (Customer No., Cust. Ledger Entry No., Amount to Apply). Each amount must be > 0 and each entry must be open and belong to its row's customer.</param>
     /// <param name="BankAccountNo">The bank account the payment is received into; the single bank line is posted here.</param>
     /// <param name="GenJnlTemplateName">General journal template used to post the payment.</param>
     /// <param name="GenJnlBatchName">General journal batch (within the template) used to post the payment.</param>
     /// <param name="ExternalDocumentNo">Optional external document reference stamped on the payment lines.</param>
     /// <returns>The Entry No. of the single Bank Account Ledger Entry created by the posting (left open for reconciliation).</returns>
     [CommitBehavior(CommitBehavior::Ignore)]
-    internal procedure PostCustomerPaymentsToBank(var ApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary; BankAccountNo: Code[20]; GenJnlTemplateName: Code[10]; GenJnlBatchName: Code[10]; ExternalDocumentNo: Code[35]): Integer
+    internal procedure PostCustomerPaymentsToBank(var TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary; BankAccountNo: Code[20]; GenJnlTemplateName: Code[10]; GenJnlBatchName: Code[10]; ExternalDocumentNo: Code[35]): Integer
     var
         GenJournalTemplate: Record "Gen. Journal Template";
         GenJournalBatch: Record "Gen. Journal Batch";
@@ -121,7 +122,7 @@ codeunit 50200 "MON Pmt Recon Post"
         CustomerSeq: Integer;
         LastBankEntryNo: Integer;
     begin
-        this.ValidateRequest(ApplyBuffer, BankAccountNo, GenJnlTemplateName, GenJnlBatchName);
+        this.ValidateRequest(TempApplyBuffer, BankAccountNo, GenJnlTemplateName, GenJnlBatchName);
 
         GenJournalTemplate.SetLoadFields("Source Code");
         GenJournalTemplate.Get(GenJnlTemplateName);
@@ -129,8 +130,8 @@ codeunit 50200 "MON Pmt Recon Post"
         GenJournalBatch.Get(GenJnlTemplateName, GenJnlBatchName);
 
         // One Document No. for the whole balanced payment document; the grand total drives the bank line.
-        DocumentNo := this.DetermineDocumentNo(GenJournalBatch, this.FirstCustLedgerEntryNo(ApplyBuffer));
-        GrandTotal := this.SumBuffer(ApplyBuffer);
+        DocumentNo := this.DetermineDocumentNo(GenJournalBatch, this.FirstCustLedgerEntryNo(TempApplyBuffer));
+        GrandTotal := this.SumBuffer(TempApplyBuffer);
 
         // Snapshot the latest existing bank ledger entry so the entry created by this posting can be
         // identified by Entry No. — robust against any Document No. reuse across earlier committed
@@ -143,12 +144,12 @@ codeunit 50200 "MON Pmt Recon Post"
         // --- One customer payment line per customer, grouped by Customer No. ---
         LineNo := 0;
         CustomerSeq := 0;
-        ApplyBuffer.Reset();
-        ApplyBuffer.SetCurrentKey("Customer No.", "Cust. Ledger Entry No.");
-        ApplyBuffer.FindSet();
+        TempApplyBuffer.Reset();
+        TempApplyBuffer.SetCurrentKey("Customer No.", "Cust. Ledger Entry No.");
+        TempApplyBuffer.FindSet();
         repeat
             // Narrow to the current customer's rows and process them as one group.
-            ApplyBuffer.SetRange("Customer No.", ApplyBuffer."Customer No.");
+            TempApplyBuffer.SetRange("Customer No.", TempApplyBuffer."Customer No.");
             CustomerSeq += 1;
             CustomerTotal := 0;
 
@@ -157,9 +158,9 @@ codeunit 50200 "MON Pmt Recon Post"
             AppliesToID := this.MakeAppliesToID(DocumentNo, CustomerSeq);
             repeat
                 this.MarkInvoiceForApplication(
-                    ApplyBuffer."Cust. Ledger Entry No.", ApplyBuffer."Amount to Apply", AppliesToID);
-                CustomerTotal += ApplyBuffer."Amount to Apply";
-            until ApplyBuffer.Next() = 0;
+                    TempApplyBuffer."Cust. Ledger Entry No.", TempApplyBuffer."Amount to Apply", AppliesToID);
+                CustomerTotal += TempApplyBuffer."Amount to Apply";
+            until TempApplyBuffer.Next() = 0;
 
             // The customer leg: negative total (a credit settling the positive invoices), NO bal account
             // (it balances against the single bank line at the end of the document).
@@ -172,7 +173,7 @@ codeunit 50200 "MON Pmt Recon Post"
             GenJournalLine.Validate("Document Type", GenJournalLine."Document Type"::Payment);
             GenJournalLine.Validate("Document No.", DocumentNo);
             GenJournalLine.Validate("Account Type", GenJournalLine."Account Type"::Customer);
-            GenJournalLine.Validate("Account No.", ApplyBuffer."Customer No.");
+            GenJournalLine.Validate("Account No.", TempApplyBuffer."Customer No.");
             GenJournalLine.Validate(Amount, -CustomerTotal);
             if ExternalDocumentNo <> '' then
                 GenJournalLine.Validate("External Document No.", ExternalDocumentNo);
@@ -181,8 +182,8 @@ codeunit 50200 "MON Pmt Recon Post"
             GenJnlPostLine.Run(GenJournalLine);
 
             // Re-widen the filter and advance to the first row of the next customer (or end the loop).
-            ApplyBuffer.SetRange("Customer No.");
-        until ApplyBuffer.Next() = 0;
+            TempApplyBuffer.SetRange("Customer No.");
+        until TempApplyBuffer.Next() = 0;
 
         // --- The single bank line: positive grand total, NO applies, NO bal account -> ONE bank entry ---
         LineNo += 10000;
@@ -262,23 +263,23 @@ codeunit 50200 "MON Pmt Recon Post"
         exit(CopyStr(DocumentNo + '-' + Format(CustomerSeq), 1, 50));
     end;
 
-    local procedure FirstCustLedgerEntryNo(var ApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary): Integer
+    local procedure FirstCustLedgerEntryNo(var TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary): Integer
     begin
-        ApplyBuffer.Reset();
-        ApplyBuffer.FindFirst();
-        exit(ApplyBuffer."Cust. Ledger Entry No.");
+        TempApplyBuffer.Reset();
+        TempApplyBuffer.FindFirst();
+        exit(TempApplyBuffer."Cust. Ledger Entry No.");
     end;
 
-    local procedure SumBuffer(var ApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary) Total: Decimal
+    local procedure SumBuffer(var TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary) Total: Decimal
     begin
-        ApplyBuffer.Reset();
-        if ApplyBuffer.FindSet() then
+        TempApplyBuffer.Reset();
+        if TempApplyBuffer.FindSet() then
             repeat
-                Total += ApplyBuffer."Amount to Apply";
-            until ApplyBuffer.Next() = 0;
+                Total += TempApplyBuffer."Amount to Apply";
+            until TempApplyBuffer.Next() = 0;
     end;
 
-    local procedure ValidateRequest(var ApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary; BankAccountNo: Code[20]; GenJnlTemplateName: Code[10]; GenJnlBatchName: Code[10])
+    local procedure ValidateRequest(var TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary; BankAccountNo: Code[20]; GenJnlTemplateName: Code[10]; GenJnlBatchName: Code[10])
     var
         Customer: Record Customer;
         BankAccount: Record "Bank Account";
@@ -286,8 +287,8 @@ codeunit 50200 "MON Pmt Recon Post"
         GenJournalBatch: Record "Gen. Journal Batch";
     begin
         // Cheap guard first — nothing to post.
-        ApplyBuffer.Reset();
-        if ApplyBuffer.IsEmpty() then
+        TempApplyBuffer.Reset();
+        if TempApplyBuffer.IsEmpty() then
             Error(NoAppliesEntriesErr);
 
         BankAccount.SetLoadFields("No.");
@@ -297,20 +298,20 @@ codeunit 50200 "MON Pmt Recon Post"
 
         // The amount-positive, customer-exists, customer-owns-entry and entry-open guards apply to EVERY
         // target row regardless of which customer it belongs to.
-        ApplyBuffer.FindSet();
+        TempApplyBuffer.FindSet();
         repeat
-            if ApplyBuffer."Amount to Apply" <= 0 then
+            if TempApplyBuffer."Amount to Apply" <= 0 then
                 Error(PaymentAmountErr);
 
             Customer.SetLoadFields("No.");
-            Customer.Get(ApplyBuffer."Customer No.");
+            Customer.Get(TempApplyBuffer."Customer No.");
 
             CustLedgerEntry.SetLoadFields("Customer No.", Open);
-            CustLedgerEntry.Get(ApplyBuffer."Cust. Ledger Entry No.");
-            if CustLedgerEntry."Customer No." <> ApplyBuffer."Customer No." then
-                Error(CustomerMismatchErr, ApplyBuffer."Cust. Ledger Entry No.", ApplyBuffer."Customer No.");
+            CustLedgerEntry.Get(TempApplyBuffer."Cust. Ledger Entry No.");
+            if CustLedgerEntry."Customer No." <> TempApplyBuffer."Customer No." then
+                Error(CustomerMismatchErr, TempApplyBuffer."Cust. Ledger Entry No.", TempApplyBuffer."Customer No.");
             if not CustLedgerEntry.Open then
-                Error(ClosedEntryErr, ApplyBuffer."Cust. Ledger Entry No.");
-        until ApplyBuffer.Next() = 0;
+                Error(ClosedEntryErr, TempApplyBuffer."Cust. Ledger Entry No.");
+        until TempApplyBuffer.Next() = 0;
     end;
 }

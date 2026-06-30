@@ -50,7 +50,7 @@ codeunit 50202 "MON Pmt Recon Service"
     var
         PmtReconPost: Codeunit "MON Pmt Recon Post";
         PmtReconMatch: Codeunit "MON Pmt Recon Match";
-        ApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary;
+        TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary;
         Response: JsonObject;
         PaymentsTok: JsonToken;
         PaymentTok: JsonToken;
@@ -88,12 +88,12 @@ codeunit 50202 "MON Pmt Recon Service"
             foreach AppliesToEntryTok in AppliesToTok.AsArray() do begin
                 AppliesToObj := AppliesToEntryTok.AsObject();
                 BufLineNo += 1;
-                ApplyBuffer.Init();
-                ApplyBuffer."Entry No." := BufLineNo;
-                ApplyBuffer."Customer No." := CustomerNo;
-                ApplyBuffer."Cust. Ledger Entry No." := this.GetInt(AppliesToObj, 'custLedgerEntryNo');
-                ApplyBuffer."Amount to Apply" := this.GetDecimal(AppliesToObj, 'amount');
-                ApplyBuffer.Insert();
+                TempApplyBuffer.Init();
+                TempApplyBuffer."Entry No." := BufLineNo;
+                TempApplyBuffer."Customer No." := CustomerNo;
+                TempApplyBuffer."Cust. Ledger Entry No." := this.GetInt(AppliesToObj, 'custLedgerEntryNo');
+                TempApplyBuffer."Amount to Apply" := this.GetDecimal(AppliesToObj, 'amount');
+                TempApplyBuffer.Insert();
             end;
         end;
 
@@ -101,7 +101,7 @@ codeunit 50202 "MON Pmt Recon Service"
         // ONE balanced posting for the grand TOTAL -> ONE open Bank Account Ledger Entry, matched 1:1.
         BankAccountLedgerEntryNo :=
             PmtReconPost.PostCustomerPaymentsToBank(
-                ApplyBuffer, BankAccountNo,
+                TempApplyBuffer, BankAccountNo,
                 JournalTemplateName, JournalBatchName, ExternalDocumentNo);
 
         PmtReconMatch.MatchBankEntryToReconLine(
