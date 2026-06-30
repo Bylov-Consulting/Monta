@@ -114,7 +114,9 @@ codeunit 50200 "MON Pmt Recon Post"
         BankAccountLedgerEntry: Record "Bank Account Ledger Entry";
         GenJnlPostLine: Codeunit "Gen. Jnl.-Post Line";
         ErrInfo: ErrorInfo;
-        GrandTotal: Decimal;
+        BankAmount: Decimal;
+        AppliesTotal: Decimal;
+        WriteOffTotal: Decimal;
         CustomerTotal: Decimal;
         DocumentNo: Code[20];
         AppliesToID: Code[50];
@@ -129,9 +131,13 @@ codeunit 50200 "MON Pmt Recon Post"
         GenJournalBatch.SetLoadFields("No. Series");
         GenJournalBatch.Get(GenJnlTemplateName, GenJnlBatchName);
 
-        // One Document No. for the whole balanced payment document; the grand total drives the bank line.
+        // One Document No. for the whole balanced payment document. The bank (cash) line is the customer
+        // applies LESS the write-offs: write-offs settle invoice value against a G/L account, never the
+        // bank, so the bank receipt equals the cash actually received.
         DocumentNo := this.DetermineDocumentNo(GenJournalBatch, this.FirstCustLedgerEntryNo(TempApplyBuffer));
-        GrandTotal := this.SumBuffer(TempApplyBuffer);
+        AppliesTotal := this.SumBuffer(TempApplyBuffer, TempApplyBuffer."Line Type"::"Customer Apply");
+        WriteOffTotal := this.SumBuffer(TempApplyBuffer, TempApplyBuffer."Line Type"::"Write-Off");
+        BankAmount := AppliesTotal - WriteOffTotal;
 
         // Snapshot the latest existing bank ledger entry so the entry created by this posting can be
         // identified by Entry No. — robust against any Document No. reuse across earlier committed
@@ -146,6 +152,9 @@ codeunit 50200 "MON Pmt Recon Post"
         CustomerSeq := 0;
         TempApplyBuffer.Reset();
         TempApplyBuffer.SetCurrentKey("Customer No.", "Cust. Ledger Entry No.");
+        // Only Customer Apply rows become customer payment lines; the Line Type filter persists across the
+        // inner SetRange("Customer No.") narrow/widen, so write-off rows are never grouped as customers.
+        TempApplyBuffer.SetRange("Line Type", TempApplyBuffer."Line Type"::"Customer Apply");
         TempApplyBuffer.FindSet();
         repeat
             // Narrow to the current customer's rows and process them as one group.
@@ -185,7 +194,34 @@ codeunit 50200 "MON Pmt Recon Post"
             TempApplyBuffer.SetRange("Customer No.");
         until TempApplyBuffer.Next() = 0;
 
-        // --- The single bank line: positive grand total, NO applies, NO bal account -> ONE bank entry ---
+        // --- One G/L write-off line per Write-Off row: positive (debit) amount, NO applies, NO bal account.
+        // The customer leg already credited the FULL invoice (so it closes); this debits the difference to
+        // the agent's G/L account. Σ(write-offs) offsets the gap between Σ(applies) and the smaller bank
+        // (cash) line, so the document still nets to zero. ---
+        TempApplyBuffer.Reset();
+        TempApplyBuffer.SetRange("Line Type", TempApplyBuffer."Line Type"::"Write-Off");
+        if TempApplyBuffer.FindSet() then
+            repeat
+                LineNo += 10000;
+                GenJournalLine.Init();
+                GenJournalLine.Validate("Journal Template Name", GenJournalTemplate.Name);
+                GenJournalLine.Validate("Journal Batch Name", GenJournalBatch.Name);
+                GenJournalLine."Line No." := LineNo;
+                GenJournalLine.Validate("Posting Date", WorkDate());
+                GenJournalLine.Validate("Document Type", GenJournalLine."Document Type"::Payment);
+                GenJournalLine.Validate("Document No.", DocumentNo);
+                GenJournalLine.Validate("Account Type", GenJournalLine."Account Type"::"G/L Account");
+                GenJournalLine.Validate("Account No.", TempApplyBuffer."G/L Account No.");
+                GenJournalLine.Validate(Amount, TempApplyBuffer."Amount to Apply");
+                if ExternalDocumentNo <> '' then
+                    GenJournalLine.Validate("External Document No.", ExternalDocumentNo);
+                GenJournalLine."Source Code" := GenJournalTemplate."Source Code";
+                GenJnlPostLine.Run(GenJournalLine);
+            until TempApplyBuffer.Next() = 0;
+        TempApplyBuffer.Reset();
+
+        // --- The single bank line: positive CASH (applies - write-offs), NO applies, NO bal account ->
+        // ONE bank entry for the cash actually received (= the statement-line amount). ---
         LineNo += 10000;
         GenJournalLine.Init();
         GenJournalLine.Validate("Journal Template Name", GenJournalTemplate.Name);
@@ -196,7 +232,7 @@ codeunit 50200 "MON Pmt Recon Post"
         GenJournalLine.Validate("Document No.", DocumentNo);
         GenJournalLine.Validate("Account Type", GenJournalLine."Account Type"::"Bank Account");
         GenJournalLine.Validate("Account No.", BankAccountNo);
-        GenJournalLine.Validate(Amount, GrandTotal);
+        GenJournalLine.Validate(Amount, BankAmount);
         if ExternalDocumentNo <> '' then
             GenJournalLine.Validate("External Document No.", ExternalDocumentNo);
         GenJournalLine."Source Code" := GenJournalTemplate."Source Code";
@@ -265,18 +301,24 @@ codeunit 50200 "MON Pmt Recon Post"
 
     local procedure FirstCustLedgerEntryNo(var TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary): Integer
     begin
+        // Seed the document number from a real applied ledger entry (Customer Apply rows only — a
+        // write-off row carries no Cust. Ledger Entry No.).
         TempApplyBuffer.Reset();
+        TempApplyBuffer.SetRange("Line Type", TempApplyBuffer."Line Type"::"Customer Apply");
         TempApplyBuffer.FindFirst();
+        TempApplyBuffer.SetRange("Line Type");
         exit(TempApplyBuffer."Cust. Ledger Entry No.");
     end;
 
-    local procedure SumBuffer(var TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary) Total: Decimal
+    local procedure SumBuffer(var TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary; LineType: Option "Customer Apply","Write-Off") Total: Decimal
     begin
         TempApplyBuffer.Reset();
+        TempApplyBuffer.SetRange("Line Type", LineType);
         if TempApplyBuffer.FindSet() then
             repeat
                 Total += TempApplyBuffer."Amount to Apply";
             until TempApplyBuffer.Next() = 0;
+        TempApplyBuffer.SetRange("Line Type");
     end;
 
     local procedure ValidateRequest(var TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary; BankAccountNo: Code[20]; GenJnlTemplateName: Code[10]; GenJnlBatchName: Code[10])
@@ -284,6 +326,7 @@ codeunit 50200 "MON Pmt Recon Post"
         Customer: Record Customer;
         BankAccount: Record "Bank Account";
         CustLedgerEntry: Record "Cust. Ledger Entry";
+        GLAccount: Record "G/L Account";
         GenJournalBatch: Record "Gen. Journal Batch";
     begin
         // Cheap guard first — nothing to post.
@@ -296,22 +339,33 @@ codeunit 50200 "MON Pmt Recon Post"
         GenJournalBatch.SetLoadFields("Name");
         GenJournalBatch.Get(GenJnlTemplateName, GenJnlBatchName);
 
-        // The amount-positive, customer-exists, customer-owns-entry and entry-open guards apply to EVERY
-        // target row regardless of which customer it belongs to.
+        // Every row must carry a positive amount; the remaining guards are per row type: Customer Apply
+        // rows must name an existing customer that owns an open ledger entry, while Write-Off rows must
+        // name an existing G/L account (direct-posting is left for the posting engine to enforce).
         TempApplyBuffer.FindSet();
         repeat
             if TempApplyBuffer."Amount to Apply" <= 0 then
                 Error(PaymentAmountErr);
 
-            Customer.SetLoadFields("No.");
-            Customer.Get(TempApplyBuffer."Customer No.");
+            case TempApplyBuffer."Line Type" of
+                TempApplyBuffer."Line Type"::"Customer Apply":
+                    begin
+                        Customer.SetLoadFields("No.");
+                        Customer.Get(TempApplyBuffer."Customer No.");
 
-            CustLedgerEntry.SetLoadFields("Customer No.", Open);
-            CustLedgerEntry.Get(TempApplyBuffer."Cust. Ledger Entry No.");
-            if CustLedgerEntry."Customer No." <> TempApplyBuffer."Customer No." then
-                Error(CustomerMismatchErr, TempApplyBuffer."Cust. Ledger Entry No.", TempApplyBuffer."Customer No.");
-            if not CustLedgerEntry.Open then
-                Error(ClosedEntryErr, TempApplyBuffer."Cust. Ledger Entry No.");
+                        CustLedgerEntry.SetLoadFields("Customer No.", Open);
+                        CustLedgerEntry.Get(TempApplyBuffer."Cust. Ledger Entry No.");
+                        if CustLedgerEntry."Customer No." <> TempApplyBuffer."Customer No." then
+                            Error(CustomerMismatchErr, TempApplyBuffer."Cust. Ledger Entry No.", TempApplyBuffer."Customer No.");
+                        if not CustLedgerEntry.Open then
+                            Error(ClosedEntryErr, TempApplyBuffer."Cust. Ledger Entry No.");
+                    end;
+                TempApplyBuffer."Line Type"::"Write-Off":
+                    begin
+                        GLAccount.SetLoadFields("No.");
+                        GLAccount.Get(TempApplyBuffer."G/L Account No.");
+                    end;
+            end;
         until TempApplyBuffer.Next() = 0;
     end;
 }

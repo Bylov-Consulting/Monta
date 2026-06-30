@@ -31,7 +31,12 @@ codeunit 50202 "MON Pmt Recon Service"
     ///           "amount":            Decimal - the received amount for this application (> 0).
     ///         }
     ///       ]
-    ///       // "writeOff": [ ... ]        - reserved for slice 6; absent in slice 5.
+    ///       "writeOff": [                 - slice 6: OPTIONAL; ZERO OR MORE payment-difference write-offs.
+    ///         {
+    ///           "glAccountNo": Code[20]   - direct-posting G/L account the difference is debited to.
+    ///           "amount":      Decimal    - the write-off amount W (> 0); never reaches the bank.
+    ///         }
+    ///       ]
     ///     }
     ///   ]
     /// }
@@ -56,8 +61,11 @@ codeunit 50202 "MON Pmt Recon Service"
         PaymentTok: JsonToken;
         AppliesToTok: JsonToken;
         AppliesToEntryTok: JsonToken;
+        WriteOffTok: JsonToken;
+        WriteOffEntryTok: JsonToken;
         PaymentObj: JsonObject;
         AppliesToObj: JsonObject;
+        WriteOffObj: JsonObject;
         BankAccountNo: Code[20];
         StatementNo: Code[20];
         JournalTemplateName: Code[10];
@@ -90,11 +98,28 @@ codeunit 50202 "MON Pmt Recon Service"
                 BufLineNo += 1;
                 TempApplyBuffer.Init();
                 TempApplyBuffer."Entry No." := BufLineNo;
+                TempApplyBuffer."Line Type" := TempApplyBuffer."Line Type"::"Customer Apply";
                 TempApplyBuffer."Customer No." := CustomerNo;
                 TempApplyBuffer."Cust. Ledger Entry No." := this.GetInt(AppliesToObj, 'custLedgerEntryNo');
                 TempApplyBuffer."Amount to Apply" := this.GetDecimal(AppliesToObj, 'amount');
                 TempApplyBuffer.Insert();
             end;
+
+            // Slice 6 (OPTIONAL): each writeOff entry absorbs the payment difference for this customer onto
+            // an agent-supplied G/L account. Absent on slices 3-5 requests -> no write-off rows, so the
+            // poster behaves exactly as before (bank = Σ applies).
+            if PaymentObj.Get('writeOff', WriteOffTok) then
+                foreach WriteOffEntryTok in WriteOffTok.AsArray() do begin
+                    WriteOffObj := WriteOffEntryTok.AsObject();
+                    BufLineNo += 1;
+                    TempApplyBuffer.Init();
+                    TempApplyBuffer."Entry No." := BufLineNo;
+                    TempApplyBuffer."Line Type" := TempApplyBuffer."Line Type"::"Write-Off";
+                    TempApplyBuffer."Customer No." := CustomerNo;
+                    TempApplyBuffer."G/L Account No." := CopyStr(this.GetText(WriteOffObj, 'glAccountNo'), 1, MaxStrLen(TempApplyBuffer."G/L Account No."));
+                    TempApplyBuffer."Amount to Apply" := this.GetDecimal(WriteOffObj, 'amount');
+                    TempApplyBuffer.Insert();
+                end;
         end;
 
         // --- Compose post + match in ONE transaction (NO intermediate Commit -> atomic) ---

@@ -30,6 +30,24 @@ table 50200 "MON Pmt Recon Apply Buf"
         field(4; "Amount to Apply"; Decimal)
         {
             Caption = 'Amount to Apply';
+            // For a Customer Apply row: the amount applied to "Cust. Ledger Entry No.".
+            // For a Write-Off row: the difference amount W posted to "G/L Account No." (debit).
+        }
+        field(5; "Line Type"; Option)
+        {
+            Caption = 'Line Type';
+            // Discriminates the two kinds of rows the unified poster consumes. Customer Apply rows are
+            // grouped per customer into one negative payment line each; Write-Off rows each become one
+            // positive G/L line. Default 0 = Customer Apply keeps every pre-slice-6 row a customer apply.
+            OptionMembers = "Customer Apply","Write-Off";
+            OptionCaption = 'Customer Apply,Write-Off';
+        }
+        field(6; "G/L Account No."; Code[20])
+        {
+            Caption = 'G/L Account No.';
+            // Only populated on a Write-Off row: the agent-nominated G/L account the payment difference
+            // is debited to. Blank on Customer Apply rows.
+            TableRelation = "G/L Account";
         }
     }
 
