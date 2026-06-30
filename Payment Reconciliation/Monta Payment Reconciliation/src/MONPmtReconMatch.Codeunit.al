@@ -5,6 +5,7 @@ codeunit 50201 "MON Pmt Recon Match"
     var
         WrongBankErr: Label 'Bank account ledger entry %1 does not belong to bank account %2.', Comment = '%1 = Bank Account Ledger Entry No., %2 = Bank Account No.';
         NotOpenErr: Label 'Bank account ledger entry %1 is not open and cannot be matched.', Comment = '%1 = Bank Account Ledger Entry No.';
+        AlreadyAppliedErr: Label 'Reconciliation line %1/%2 already has applied entries and cannot be matched again.', Comment = '%1 = Statement No., %2 = Statement Line No.';
 
     /// <summary>
     /// Matches an OPEN Bank Account Ledger Entry (e.g. the receipt produced by
@@ -41,6 +42,11 @@ codeunit 50201 "MON Pmt Recon Match"
             Error(WrongBankErr, BankAccountLedgerEntryNo, BankAccountNo);
         if not BankAccLedgEntry.Open then
             Error(NotOpenErr, BankAccountLedgerEntryNo);
+        // Guard against double-application: the idempotency log only tracks API-originated calls, so a line
+        // already matched by ANOTHER source (a manual UI match, or a repaired/missing log row) would otherwise
+        // have ApplyEntries run a second time, doubling Applied Entries/Amount. Refuse a line already matched.
+        if BankAccReconLine."Applied Entries" > 0 then
+            Error(AlreadyAppliedErr, StatementNo, StatementLineNo);
 
         // Standard one-entry <-> one-line match. Public codeunit 375 "Bank Acc. Entry Set Recon.-No."
         // does exactly what the standard Apply action does: SetReconNo stamps the ledger entry's

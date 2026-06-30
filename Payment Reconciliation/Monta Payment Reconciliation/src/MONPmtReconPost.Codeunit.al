@@ -9,6 +9,7 @@ codeunit 50200 "MON Pmt Recon Post"
         BankEntryNotFoundDetailTxt: Label 'No Bank Account Ledger Entry was created on bank account %1 for document %2 after posting the customer payment.', Comment = '%1 = Bank Account No., %2 = Document No.';
         ClosedEntryErr: Label 'Customer ledger entry %1 is closed and cannot be settled by this payment.', Comment = '%1 = Cust. Ledger Entry No.';
         CustomerMismatchErr: Label 'Customer ledger entry %1 does not belong to customer %2.', Comment = '%1 = Cust. Ledger Entry No., %2 = Customer No.';
+        InvalidBankAmountErr: Label 'The total write-off amount (%1) must be less than the total applied amount (%2).', Comment = '%1 = write-off total, %2 = applied total';
 
     /// <summary>
     /// Posts an incoming customer payment that balances to a Bank Account — creating a Bank
@@ -138,6 +139,11 @@ codeunit 50200 "MON Pmt Recon Post"
         AppliesTotal := this.SumBuffer(TempApplyBuffer, TempApplyBuffer."Line Type"::"Customer Apply");
         WriteOffTotal := this.SumBuffer(TempApplyBuffer, TempApplyBuffer."Line Type"::"Write-Off");
         BankAmount := AppliesTotal - WriteOffTotal;
+        // The bank must receive a POSITIVE amount: write-offs absorb the payment difference, never the whole
+        // (or more than the) applied amount. A zero/negative bank line would post no cash (or a debit), silently
+        // corrupting the reconciliation balance.
+        if BankAmount <= 0 then
+            Error(InvalidBankAmountErr, WriteOffTotal, AppliesTotal);
 
         // Snapshot the latest existing bank ledger entry so the entry created by this posting can be
         // identified by Entry No. — robust against any Document No. reuse across earlier committed
