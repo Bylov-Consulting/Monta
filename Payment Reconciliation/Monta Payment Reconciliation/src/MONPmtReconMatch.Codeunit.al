@@ -2,6 +2,10 @@ codeunit 50201 "MON Pmt Recon Match"
 {
     Access = Public;
 
+    var
+        WrongBankErr: Label 'Bank account ledger entry %1 does not belong to bank account %2.', Comment = '%1 = Bank Account Ledger Entry No., %2 = Bank Account No.';
+        NotOpenErr: Label 'Bank account ledger entry %1 is not open and cannot be matched.', Comment = '%1 = Bank Account Ledger Entry No.';
+
     /// <summary>
     /// Matches an OPEN Bank Account Ledger Entry (e.g. the receipt produced by
     /// <see cref="MON Pmt Recon Post.PostCustomerPaymentToBank"/>) to a standard Bank Acc.
@@ -29,6 +33,14 @@ codeunit 50201 "MON Pmt Recon Match"
             BankAccReconLine."Statement Type"::"Bank Reconciliation",
             BankAccountNo, StatementNo, StatementLineNo);
         BankAccLedgEntry.Get(BankAccountLedgerEntryNo);
+
+        // Guard: the ledger entry must belong to the supplied bank account (codeunit 375 does not
+        // cross-check, so a wrong entry would silently stamp a cross-account statement link) and
+        // must still be open (matching a closed entry would overwrite a prior statement's link).
+        if BankAccLedgEntry."Bank Account No." <> BankAccountNo then
+            Error(WrongBankErr, BankAccountLedgerEntryNo, BankAccountNo);
+        if not BankAccLedgEntry.Open then
+            Error(NotOpenErr, BankAccountLedgerEntryNo);
 
         // Standard one-entry <-> one-line match. Public codeunit 375 "Bank Acc. Entry Set Recon.-No."
         // does exactly what the standard Apply action does: SetReconNo stamps the ledger entry's
