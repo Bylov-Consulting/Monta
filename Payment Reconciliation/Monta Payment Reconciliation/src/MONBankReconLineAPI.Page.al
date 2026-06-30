@@ -16,6 +16,7 @@ page 50205 "MON Bank Recon Line API"
     ModifyAllowed = false;
     DeleteAllowed = false;
     Extensible = false;
+    DataAccessIntent = ReadOnly;
 
     // The agent reads ALL Bank Reconciliation lines and itself decides which to act on, so the
     // server must NOT pre-filter by applied/match status. The ONLY filter is the TYPE filter that
@@ -29,9 +30,14 @@ page 50205 "MON Bank Recon Line API"
         {
             repeater(Group)
             {
-                field(systemId; Rec.SystemId)
+                field(id; Rec.SystemId)
                 {
-                    Caption = 'SystemId';
+                    Caption = 'id';
+                    Editable = false;
+                }
+                field(lastModifiedDateTime; Rec.SystemModifiedAt)
+                {
+                    Caption = 'Last Modified Date Time';
                     Editable = false;
                 }
                 // --- Line identity (table 274 primary key) ---
@@ -100,4 +106,11 @@ page 50205 "MON Bank Recon Line API"
             }
         }
     }
+
+    trigger OnOpenPage()
+    begin
+        // Serve only committed data — the agent makes financial decisions on this read, so it must
+        // never see rows from a concurrent bank-reconciliation transaction that could later roll back.
+        Rec.ReadIsolation := IsolationLevel::ReadCommitted;
+    end;
 }
