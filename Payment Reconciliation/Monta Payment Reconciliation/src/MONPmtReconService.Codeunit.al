@@ -22,16 +22,16 @@ codeunit 50202 "MON Pmt Recon Service"
     ///   "journalTemplateName": Code[10]  - Gen. journal template used to post the payment.
     ///   "journalBatchName":    Code[10]  - Gen. journal batch (within the template).
     ///   "externalDocumentNo":  Code[35]  - optional external document reference stamped on the line.
-    ///   "payments": [                     - slice 4: EXACTLY one entry (slice 5 allows many).
+    ///   "payments": [                     - slice 5: ONE OR MORE entries (one per customer).
     ///     {
     ///       "customerNo": Code[20]        - customer whose payment is being posted.
-    ///       "appliesTo": [                - slice 4: ONE OR MORE entries (one customer, N invoices).
+    ///       "appliesTo": [                - ONE OR MORE entries (this customer's N invoices).
     ///         {
     ///           "custLedgerEntryNo": Integer - open Cust. Ledger Entry (invoice) settled by this apply.
     ///           "amount":            Decimal - the received amount for this application (> 0).
     ///         }
     ///       ]
-    ///       // "writeOff": [ ... ]        - reserved for slice 6; absent in slice 3.
+    ///       // "writeOff": [ ... ]        - reserved for slice 6; absent in slice 5.
     ///     }
     ///   ]
     /// }
@@ -50,6 +50,7 @@ codeunit 50202 "MON Pmt Recon Service"
     var
         PmtReconPost: Codeunit "MON Pmt Recon Post";
         PmtReconMatch: Codeunit "MON Pmt Recon Match";
+        ApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary;
         Response: JsonObject;
         PaymentsTok: JsonToken;
         PaymentTok: JsonToken;
@@ -57,7 +58,6 @@ codeunit 50202 "MON Pmt Recon Service"
         AppliesToEntryTok: JsonToken;
         PaymentObj: JsonObject;
         AppliesToObj: JsonObject;
-        AppliesToEntries: Dictionary of [Integer, Decimal];
         BankAccountNo: Code[20];
         StatementNo: Code[20];
         JournalTemplateName: Code[10];
@@ -65,10 +65,10 @@ codeunit 50202 "MON Pmt Recon Service"
         ExternalDocumentNo: Code[35];
         CustomerNo: Code[20];
         StatementLineNo: Integer;
-        CustLedgerEntryNo: Integer;
+        BufLineNo: Integer;
         BankAccountLedgerEntryNo: Integer;
     begin
-        // --- Parse the header scalars (slice 4 assumes the settled happy-path shape) ---
+        // --- Parse the header scalars (settled happy-path shape) ---
         BankAccountNo := CopyStr(this.GetText(Request, 'bankAccountNo'), 1, MaxStrLen(BankAccountNo));
         StatementNo := CopyStr(this.GetText(Request, 'statementNo'), 1, MaxStrLen(StatementNo));
         StatementLineNo := this.GetInt(Request, 'statementLineNo');
@@ -76,25 +76,32 @@ codeunit 50202 "MON Pmt Recon Service"
         JournalBatchName := CopyStr(this.GetText(Request, 'journalBatchName'), 1, MaxStrLen(JournalBatchName));
         ExternalDocumentNo := CopyStr(this.GetText(Request, 'externalDocumentNo'), 1, MaxStrLen(ExternalDocumentNo));
 
-        // --- Parse payments[0] (slice 4: exactly one customer) and its FULL appliesTo set ---
+        // --- Flatten EVERY payment (slice 5: one or more customers) and its FULL appliesTo set into the
+        // per-customer buffer: one row per (customer, invoice, amount) so the unified poster builds one
+        // balanced document = one payment line per customer + one bank line for the grand total. ---
         Request.Get('payments', PaymentsTok);
-        PaymentsTok.AsArray().Get(0, PaymentTok);
-        PaymentObj := PaymentTok.AsObject();
-        CustomerNo := CopyStr(this.GetText(PaymentObj, 'customerNo'), 1, MaxStrLen(CustomerNo));
+        foreach PaymentTok in PaymentsTok.AsArray() do begin
+            PaymentObj := PaymentTok.AsObject();
+            CustomerNo := CopyStr(this.GetText(PaymentObj, 'customerNo'), 1, MaxStrLen(CustomerNo));
 
-        // Collect EVERY (custLedgerEntryNo -> amount) pair so the one receipt settles all invoices.
-        PaymentObj.Get('appliesTo', AppliesToTok);
-        foreach AppliesToEntryTok in AppliesToTok.AsArray() do begin
-            AppliesToObj := AppliesToEntryTok.AsObject();
-            CustLedgerEntryNo := this.GetInt(AppliesToObj, 'custLedgerEntryNo');
-            AppliesToEntries.Set(CustLedgerEntryNo, this.GetDecimal(AppliesToObj, 'amount'));
+            PaymentObj.Get('appliesTo', AppliesToTok);
+            foreach AppliesToEntryTok in AppliesToTok.AsArray() do begin
+                AppliesToObj := AppliesToEntryTok.AsObject();
+                BufLineNo += 1;
+                ApplyBuffer.Init();
+                ApplyBuffer."Entry No." := BufLineNo;
+                ApplyBuffer."Customer No." := CustomerNo;
+                ApplyBuffer."Cust. Ledger Entry No." := this.GetInt(AppliesToObj, 'custLedgerEntryNo');
+                ApplyBuffer."Amount to Apply" := this.GetDecimal(AppliesToObj, 'amount');
+                ApplyBuffer.Insert();
+            end;
         end;
 
         // --- Compose post + match in ONE transaction (NO intermediate Commit -> atomic) ---
-        // ONE balanced posting for the TOTAL -> ONE open Bank Account Ledger Entry, matched 1:1.
+        // ONE balanced posting for the grand TOTAL -> ONE open Bank Account Ledger Entry, matched 1:1.
         BankAccountLedgerEntryNo :=
-            PmtReconPost.PostCustomerPaymentToBankMulti(
-                CustomerNo, BankAccountNo, AppliesToEntries,
+            PmtReconPost.PostCustomerPaymentsToBank(
+                ApplyBuffer, BankAccountNo,
                 JournalTemplateName, JournalBatchName, ExternalDocumentNo);
 
         PmtReconMatch.MatchBankEntryToReconLine(
