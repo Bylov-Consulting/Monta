@@ -56,6 +56,10 @@ codeunit 50202 "MON Pmt Recon Service"
     var
         AlreadyReconciledErr: Label 'Reconciliation line %1/%2 has already been reconciled by a different request.', Comment = '%1 = Statement No., %2 = Statement Line No.';
         InvalidRequestErr: Label 'The request body is not a valid JSON object.';
+        RequiredFieldErr: Label 'The request is missing required field ''%1''.', Comment = '%1 = the missing JSON field name';
+        NoPaymentsErr: Label 'The request must contain at least one payment.';
+        PaymentNoAppliesErr: Label 'Each payment must apply to at least one customer ledger entry.';
+        DuplicateApplyErr: Label 'Customer ledger entry %1 appears more than once in the request.', Comment = '%1 = Cust. Ledger Entry No.';
         SuccessTelemetryTxt: Label 'PostAndReconcile posted and matched the reconciliation line.', Locked = true;
 
     /// <summary>
@@ -110,6 +114,10 @@ codeunit 50202 "MON Pmt Recon Service"
         BufLineNo: Integer;
         BankAccountLedgerEntryNo: Integer;
     begin
+        // --- Validate the request schema up front (BEFORE the idempotency gate and any posting) so the
+        // agent caller gets a clear, actionable error instead of an opaque downstream failure. ---
+        this.ValidateRequest(Request);
+
         // --- Parse the header scalars (settled happy-path shape) ---
         BankAccountNo := CopyStr(this.GetText(Request, 'bankAccountNo'), 1, MaxStrLen(BankAccountNo));
         StatementNo := CopyStr(this.GetText(Request, 'statementNo'), 1, MaxStrLen(StatementNo));
@@ -210,6 +218,65 @@ codeunit 50202 "MON Pmt Recon Service"
         // MatchBankEntryToReconLine either succeeds or raises, so reaching here proves the match
         // was applied -> reconciliationLineMatched is unconditionally true on this path.
         exit(this.BuildResponse(BankAccountLedgerEntryNo));
+    end;
+
+    /// <summary>
+    /// Validates the request schema BEFORE the idempotency gate / any posting, so a malformed request is
+    /// rejected with a clear, actionable error rather than an opaque downstream failure:
+    /// (1) each required header field (bankAccountNo, statementNo, journalTemplateName, journalBatchName)
+    ///     must be present and non-blank; (2) payments must be a non-empty array; (3) each payment must
+    ///     carry a non-empty appliesTo array; (4) no custLedgerEntryNo may repeat within one payment.
+    /// </summary>
+    local procedure ValidateRequest(Request: JsonObject)
+    var
+        PaymentsTok: JsonToken;
+        PaymentTok: JsonToken;
+        AppliesToTok: JsonToken;
+        AppliesToEntryTok: JsonToken;
+        PaymentObj: JsonObject;
+        SeenEntryNos: List of [Integer];
+        CustLedgerEntryNo: Integer;
+    begin
+        // (1) Required header fields: absent OR blank text value is rejected.
+        this.ValidateRequiredField(Request, 'bankAccountNo');
+        this.ValidateRequiredField(Request, 'statementNo');
+        this.ValidateRequiredField(Request, 'journalTemplateName');
+        this.ValidateRequiredField(Request, 'journalBatchName');
+
+        // (2) payments must be present, an array, and non-empty.
+        if not Request.Get('payments', PaymentsTok) then
+            Error(NoPaymentsErr);
+        if not PaymentsTok.IsArray() then
+            Error(NoPaymentsErr);
+        if PaymentsTok.AsArray().Count() = 0 then
+            Error(NoPaymentsErr);
+
+        // (3) + (4) per-payment appliesTo presence and duplicate detection.
+        foreach PaymentTok in PaymentsTok.AsArray() do begin
+            PaymentObj := PaymentTok.AsObject();
+
+            if not PaymentObj.Get('appliesTo', AppliesToTok) then
+                Error(PaymentNoAppliesErr);
+            if not AppliesToTok.IsArray() then
+                Error(PaymentNoAppliesErr);
+            if AppliesToTok.AsArray().Count() = 0 then
+                Error(PaymentNoAppliesErr);
+
+            Clear(SeenEntryNos);
+            foreach AppliesToEntryTok in AppliesToTok.AsArray() do begin
+                CustLedgerEntryNo := this.GetInt(AppliesToEntryTok.AsObject(), 'custLedgerEntryNo');
+                if SeenEntryNos.Contains(CustLedgerEntryNo) then
+                    Error(DuplicateApplyErr, CustLedgerEntryNo);
+                SeenEntryNos.Add(CustLedgerEntryNo);
+            end;
+        end;
+    end;
+
+    /// <summary>Rejects an absent or blank required header field with the field-naming RequiredFieldErr.</summary>
+    local procedure ValidateRequiredField(Request: JsonObject; FieldName: Text)
+    begin
+        if this.GetText(Request, FieldName) = '' then
+            Error(RequiredFieldErr, FieldName);
     end;
 
     /// <summary>Emits operational success telemetry with the recon-line identity and the bank entry created.</summary>
