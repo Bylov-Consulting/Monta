@@ -55,6 +55,7 @@ codeunit 50202 "MON Pmt Recon Service"
     /// the same line is rejected as a conflict.</remarks>
     var
         AlreadyReconciledErr: Label 'Reconciliation line %1/%2 has already been reconciled by a different request.', Comment = '%1 = Statement No., %2 = Statement Line No.';
+        SuccessTelemetryTxt: Label 'PostAndReconcile posted and matched the reconciliation line.', Locked = true;
 
     [CommitBehavior(CommitBehavior::Ignore)]
     procedure PostAndReconcile(Request: JsonObject): JsonObject
@@ -175,10 +176,29 @@ codeunit 50202 "MON Pmt Recon Service"
             PmtReconLog."Payment Document No." := BankAccountLedgerEntry."Document No.";
         PmtReconLog.Insert(false);
 
+        // Operational success telemetry (custom dimensions). Failures are not caught here — they propagate
+        // and are captured by BC's built-in platform error telemetry; a catch wrapper (Codeunit.Run) was
+        // rejected because it breaks the test framework's transaction isolation. Verified in the smoke test.
+        this.LogSuccess(BankAccountNo, StatementNo, StatementLineNo, BankAccountLedgerEntryNo);
+
         // --- Build the response per the stable contract ---
         // MatchBankEntryToReconLine either succeeds or raises, so reaching here proves the match
         // was applied -> reconciliationLineMatched is unconditionally true on this path.
         exit(this.BuildResponse(BankAccountLedgerEntryNo));
+    end;
+
+    /// <summary>Emits operational success telemetry with the recon-line identity and the bank entry created.</summary>
+    local procedure LogSuccess(BankAccountNo: Code[20]; StatementNo: Code[20]; StatementLineNo: Integer; BankAccountLedgerEntryNo: Integer)
+    var
+        TelemetryDims: Dictionary of [Text, Text];
+    begin
+        TelemetryDims.Add('operation', 'PostAndReconcile');
+        TelemetryDims.Add('result', 'Success');
+        TelemetryDims.Add('bankAccountNo', BankAccountNo);
+        TelemetryDims.Add('statementNo', StatementNo);
+        TelemetryDims.Add('statementLineNo', Format(StatementLineNo));
+        TelemetryDims.Add('bankAccountLedgerEntryNo', Format(BankAccountLedgerEntryNo));
+        Session.LogMessage('MON-PR-0001', SuccessTelemetryTxt, Verbosity::Normal, DataClassification::SystemMetadata, TelemetryScope::ExtensionPublisher, TelemetryDims);
     end;
 
     /// <summary>

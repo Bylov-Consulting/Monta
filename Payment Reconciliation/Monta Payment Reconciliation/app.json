@@ -15,13 +15,6 @@
   "screenshots": [],
   "platform": "28.0.0.0",
   "application": "28.0.0.0",
-  "internalsVisibleTo": [
-    {
-      "id": "71bdfc54-6225-46be-b3e5-ecc51207292c",
-      "name": "Monta Payment Reconciliation.Test",
-      "publisher": "Bylov Consulting"
-    }
-  ],
   "runtime": "17.0",
   "idRanges": [
     {
