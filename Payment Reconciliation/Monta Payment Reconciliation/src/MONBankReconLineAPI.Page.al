@@ -18,15 +18,10 @@ page 50205 "MON Bank Recon Line API"
     Extensible = false;
 
     // The agent reads ALL Bank Reconciliation lines and itself decides which to act on, so the
-    // server must NOT pre-filter by applied/match status. The ONLY legitimate SourceTableView
-    // filter is the TYPE filter that scopes the read to bank-reconciliation lines.
-    //
-    // RED (slice 9): the extra "Difference = filter(<> 0)" clause is DELIBERATELY WRONG — it hides
-    // every fully-applied (reconciled) line (Difference = 0). The slice-9 test proves a matched line
-    // is still returned, so it FAILS here. GREEN removes the Difference clause, leaving only the
-    // Statement Type filter.
-    SourceTableView = where("Statement Type" = const("Bank Reconciliation"),
-                            "Difference" = filter(<> 0));
+    // server must NOT pre-filter by applied/match status. The ONLY filter is the TYPE filter that
+    // scopes the read to bank-reconciliation lines (not check reconciliations) — matched and
+    // unmatched lines alike are returned; status interpretation is the agent's job.
+    SourceTableView = where("Statement Type" = const("Bank Reconciliation"));
 
     layout
     {
