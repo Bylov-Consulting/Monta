@@ -337,8 +337,11 @@ codeunit 50202 "MON Pmt Recon Service"
     /// <summary>
     /// Builds the order-independent canonical string the idempotency hash is taken over. Header scalars are
     /// emitted in a FIXED field order (typed, so '1'/'01'/whitespace and decimal rendering normalise); the
-    /// payments are each canonicalised then SORTED so payment order is irrelevant. Delimiters ('|' between
-    /// fields, '~' between records) cannot collide with the code/decimal data they separate.
+    /// payments are each canonicalised then SORTED so payment order is irrelevant. The delimiters ('|' between
+    /// fields, '~' between records, ':' within an entry) are ASSUMED not to occur in BC-standard code values —
+    /// a practical convention, NOT a type guarantee (a Code field can technically hold any character). For the
+    /// controlled Monta agent with alphanumeric codes this holds; length-prefixing would remove even that
+    /// assumption (tracked as optional hardening).
     /// </summary>
     local procedure BuildCanonicalRequest(Request: JsonObject): Text
     var
@@ -347,7 +350,7 @@ codeunit 50202 "MON Pmt Recon Service"
         PaymentCanonicals: List of [Text];
         PaymentCanonical: Text;
         HeaderSegment: Text;
-        PaymentsSegment: Text;
+        PaymentsSegment: TextBuilder;
     begin
         HeaderSegment :=
             this.GetText(Request, 'bankAccountNo') + '|' +
@@ -362,9 +365,9 @@ codeunit 50202 "MON Pmt Recon Service"
                 PaymentCanonicals.Add(this.BuildCanonicalPayment(PaymentTok.AsObject()));
         this.SortTextList(PaymentCanonicals);
         foreach PaymentCanonical in PaymentCanonicals do
-            PaymentsSegment += PaymentCanonical + '~';
+            PaymentsSegment.Append(PaymentCanonical + '~');
 
-        exit(HeaderSegment + '~~' + PaymentsSegment);
+        exit(HeaderSegment + '~~' + PaymentsSegment.ToText());
     end;
 
     /// <summary>
@@ -382,9 +385,9 @@ codeunit 50202 "MON Pmt Recon Service"
         AppliesEntries: List of [Text];
         WriteOffEntries: List of [Text];
         EntryText: Text;
-        Result: Text;
+        Result: TextBuilder;
     begin
-        Result := this.GetText(PaymentObj, 'customerNo');
+        Result.Append(this.GetText(PaymentObj, 'customerNo'));
 
         if PaymentObj.Get('appliesTo', AppliesToTok) then
             foreach EntryTok in AppliesToTok.AsArray() do begin
@@ -394,9 +397,9 @@ codeunit 50202 "MON Pmt Recon Service"
                     Format(this.GetDecimal(EntryObj, 'amount'), 0, 9));
             end;
         this.SortTextList(AppliesEntries);
-        Result += '|A';
+        Result.Append('|A');
         foreach EntryText in AppliesEntries do
-            Result += '|' + EntryText;
+            Result.Append('|' + EntryText);
 
         if PaymentObj.Get('writeOff', WriteOffTok) then
             foreach EntryTok in WriteOffTok.AsArray() do begin
@@ -406,11 +409,11 @@ codeunit 50202 "MON Pmt Recon Service"
                     Format(this.GetDecimal(EntryObj, 'amount'), 0, 9));
             end;
         this.SortTextList(WriteOffEntries);
-        Result += '|W';
+        Result.Append('|W');
         foreach EntryText in WriteOffEntries do
-            Result += '|' + EntryText;
+            Result.Append('|' + EntryText);
 
-        exit(Result);
+        exit(Result.ToText());
     end;
 
     /// <summary>
