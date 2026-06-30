@@ -22,12 +22,12 @@ codeunit 50202 "MON Pmt Recon Service"
     ///   "journalTemplateName": Code[10]  - Gen. journal template used to post the payment.
     ///   "journalBatchName":    Code[10]  - Gen. journal batch (within the template).
     ///   "externalDocumentNo":  Code[35]  - optional external document reference stamped on the line.
-    ///   "payments": [                     - slice 3: EXACTLY one entry (slices 4-5 allow many).
+    ///   "payments": [                     - slice 4: EXACTLY one entry (slice 5 allows many).
     ///     {
     ///       "customerNo": Code[20]        - customer whose payment is being posted.
-    ///       "appliesTo": [                - slice 3: EXACTLY one entry (slices 4-5 allow many).
+    ///       "appliesTo": [                - slice 4: ONE OR MORE entries (one customer, N invoices).
     ///         {
-    ///           "custLedgerEntryNo": Integer - open Cust. Ledger Entry (invoice) settled in full.
+    ///           "custLedgerEntryNo": Integer - open Cust. Ledger Entry (invoice) settled by this apply.
     ///           "amount":            Decimal - the received amount for this application (> 0).
     ///         }
     ///       ]
@@ -56,6 +56,7 @@ codeunit 50202 "MON Pmt Recon Service"
         AppliesToEntryTok: JsonToken;
         PaymentObj: JsonObject;
         AppliesToObj: JsonObject;
+        AppliesToEntries: Dictionary of [Integer, Decimal];
         BankAccountNo: Code[20];
         StatementNo: Code[20];
         JournalTemplateName: Code[10];
@@ -65,9 +66,8 @@ codeunit 50202 "MON Pmt Recon Service"
         StatementLineNo: Integer;
         CustLedgerEntryNo: Integer;
         BankAccountLedgerEntryNo: Integer;
-        Amount: Decimal;
     begin
-        // --- Parse the header scalars (slice 3 assumes the settled happy-path shape) ---
+        // --- Parse the header scalars (slice 4 assumes the settled happy-path shape) ---
         BankAccountNo := CopyStr(GetText(Request, 'bankAccountNo'), 1, MaxStrLen(BankAccountNo));
         StatementNo := CopyStr(GetText(Request, 'statementNo'), 1, MaxStrLen(StatementNo));
         StatementLineNo := GetInt(Request, 'statementLineNo');
@@ -75,22 +75,25 @@ codeunit 50202 "MON Pmt Recon Service"
         JournalBatchName := CopyStr(GetText(Request, 'journalBatchName'), 1, MaxStrLen(JournalBatchName));
         ExternalDocumentNo := CopyStr(GetText(Request, 'externalDocumentNo'), 1, MaxStrLen(ExternalDocumentNo));
 
-        // --- Parse payments[0] and its appliesTo[0] (slice 3: exactly one of each) ---
+        // --- Parse payments[0] (slice 4: exactly one customer) and its FULL appliesTo set ---
         Request.Get('payments', PaymentsTok);
         PaymentsTok.AsArray().Get(0, PaymentTok);
         PaymentObj := PaymentTok.AsObject();
         CustomerNo := CopyStr(GetText(PaymentObj, 'customerNo'), 1, MaxStrLen(CustomerNo));
 
+        // Collect EVERY (custLedgerEntryNo -> amount) pair so the one receipt settles all invoices.
         PaymentObj.Get('appliesTo', AppliesToTok);
-        AppliesToTok.AsArray().Get(0, AppliesToEntryTok);
-        AppliesToObj := AppliesToEntryTok.AsObject();
-        CustLedgerEntryNo := GetInt(AppliesToObj, 'custLedgerEntryNo');
-        Amount := GetDecimal(AppliesToObj, 'amount');
+        foreach AppliesToEntryTok in AppliesToTok.AsArray() do begin
+            AppliesToObj := AppliesToEntryTok.AsObject();
+            CustLedgerEntryNo := GetInt(AppliesToObj, 'custLedgerEntryNo');
+            AppliesToEntries.Set(CustLedgerEntryNo, GetDecimal(AppliesToObj, 'amount'));
+        end;
 
         // --- Compose post + match in ONE transaction (NO intermediate Commit -> atomic) ---
+        // ONE balanced posting for the TOTAL -> ONE open Bank Account Ledger Entry, matched 1:1.
         BankAccountLedgerEntryNo :=
-            PmtReconPost.PostCustomerPaymentToBank(
-                CustomerNo, BankAccountNo, Amount, CustLedgerEntryNo,
+            PmtReconPost.PostCustomerPaymentToBankMulti(
+                CustomerNo, BankAccountNo, AppliesToEntries,
                 JournalTemplateName, JournalBatchName, ExternalDocumentNo);
 
         PmtReconMatch.MatchBankEntryToReconLine(
