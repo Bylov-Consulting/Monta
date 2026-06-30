@@ -55,7 +55,32 @@ codeunit 50202 "MON Pmt Recon Service"
     /// the same line is rejected as a conflict.</remarks>
     var
         AlreadyReconciledErr: Label 'Reconciliation line %1/%2 has already been reconciled by a different request.', Comment = '%1 = Statement No., %2 = Statement Line No.';
+        InvalidRequestErr: Label 'The request body is not a valid JSON object.';
         SuccessTelemetryTxt: Label 'PostAndReconcile posted and matched the reconciliation line.', Locked = true;
+
+    /// <summary>
+    /// Text-boundary wrapper over <see cref="PostAndReconcile"/> for the OData [ServiceEnabled] bound
+    /// action: the agent sends the request as a JSON string and receives the response as a JSON string.
+    /// Parses the text into the JsonObject contract, runs the composite, and serialises the response
+    /// back to text. ALL business logic lives in PostAndReconcile (fully unit-tested across slices 3-7);
+    /// this only crosses the Text&lt;-&gt;JSON boundary that an OData action parameter (Edm.String) needs,
+    /// keeping the bound action on the API page a one-line delegation.
+    /// </summary>
+    /// <param name="Request">The composite request (see PostAndReconcile) serialised as a JSON string.</param>
+    /// <returns>The PostAndReconcile response serialised as a JSON string.</returns>
+    [CommitBehavior(CommitBehavior::Ignore)]
+    procedure PostAndReconcileJson(Request: Text): Text
+    var
+        RequestObj: JsonObject;
+        ResponseObj: JsonObject;
+        ResponseText: Text;
+    begin
+        if not RequestObj.ReadFrom(Request) then
+            Error(InvalidRequestErr);
+        ResponseObj := this.PostAndReconcile(RequestObj);
+        ResponseObj.WriteTo(ResponseText);
+        exit(ResponseText);
+    end;
 
     [CommitBehavior(CommitBehavior::Ignore)]
     procedure PostAndReconcile(Request: JsonObject): JsonObject

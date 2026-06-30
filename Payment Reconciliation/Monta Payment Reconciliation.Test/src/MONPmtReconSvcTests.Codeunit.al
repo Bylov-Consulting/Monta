@@ -147,6 +147,138 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
     end;
 
     [Test]
+    procedure PostAndReconcileJson_TextBoundary()
+    var
+        Customer: Record Customer;
+        Item: Record Item;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        SalesHeader: Record "Sales Header";
+        SalesLine: Record "Sales Line";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        BankAccReconciliation: Record "Bank Acc. Reconciliation";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Response: JsonObject;
+        RequestText: Text;
+        ResponseText: Text;
+        PostedInvoiceNo: Code[20];
+        AppliedCustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+        StatementAmount: Decimal;
+        ResultBankEntryNo: Integer;
+        ResultMatched: Boolean;
+    begin
+        // [SCENARIO] Slice 10: the agent-facing OData bound action postAndReconcile carries the request and
+        // response as JSON STRINGS (Edm.String action parameter/return). The bound action is a one-line
+        // delegate to MON Pmt Recon Service.PostAndReconcileJson, so this drives that text-boundary method
+        // directly: a SERIALISED request string must produce the SAME composite post+match as the JsonObject
+        // path AND a response STRING that parses back to the stable {bankAccountLedgerEntryNo,
+        // reconciliationLineMatched} contract. (The HTTP/OData transport + auth + entity binding around the
+        // [ServiceEnabled] action cannot be invoked by a TestPage and is verified in the sandbox smoke test;
+        // this proves everything from the text boundary inward, which is all the action itself contributes.)
+
+        // [GIVEN] A customer with a posted sales invoice for a known amount.
+        LibrarySales.CreateCustomer(Customer);
+        LibraryInventory.CreateItem(Item);
+        LibrarySales.CreateSalesHeader(SalesHeader, SalesHeader."Document Type"::Invoice, Customer."No.");
+        LibrarySales.CreateSalesLine(SalesLine, SalesHeader, SalesLine.Type::Item, Item."No.", 1);
+        SalesLine.Validate("Unit Price", LibraryRandom.RandDecInRange(100, 1000, 2));
+        SalesLine.Modify(true);
+        PostedInvoiceNo := LibrarySales.PostSalesDocument(SalesHeader, true, true);
+
+        CustLedgerEntry.SetRange("Document Type", CustLedgerEntry."Document Type"::Invoice);
+        CustLedgerEntry.SetRange("Document No.", PostedInvoiceNo);
+        CustLedgerEntry.FindFirst();
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        AppliedCustLedgerEntryNo := CustLedgerEntry."Entry No.";
+        InvoiceAmount := CustLedgerEntry."Remaining Amount";
+
+        // [GIVEN] A bank account, a journal template + batch, and ONE unmatched reconciliation line whose
+        // Statement Amount equals the invoice amount.
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+
+        StatementAmount := InvoiceAmount;
+        LibraryERM.CreateBankAccReconciliation(
+            BankAccReconciliation, BankAccount."No.",
+            BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+        LibraryERM.CreateBankAccReconciliationLn(BankAccReconLine, BankAccReconciliation);
+        BankAccReconLine.Validate("Statement Amount", StatementAmount);
+        BankAccReconLine.Difference := StatementAmount; // unmatched: nothing applied yet
+        BankAccReconLine.Modify(true);
+        StatementNo := BankAccReconLine."Statement No.";
+        StatementLineNo := BankAccReconLine."Statement Line No.";
+
+        Assert.AreEqual(
+            0, BankAccReconLine."Applied Entries",
+            'Precondition: the reconciliation line must start with no applied entries.');
+
+        // [WHEN] The request is SERIALISED to a JSON string (exactly what an OData action parameter delivers)
+        // and passed to the text-boundary delegate the bound action calls.
+        Request := BuildRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer."No.", AppliedCustLedgerEntryNo, InvoiceAmount);
+        Request.WriteTo(RequestText);
+        Assert.AreNotEqual('', RequestText, 'Arrange: the request must serialise to a non-empty JSON string.');
+
+        ResponseText := PmtReconService.PostAndReconcileJson(RequestText);
+
+        // [THEN] The response is a JSON STRING that parses back to the stable contract. (A raw entry-No.
+        // string, an empty string, or a non-object would fail ReadFrom -> the boundary did not round-trip.)
+        Assert.IsTrue(
+            Response.ReadFrom(ResponseText),
+            'PostAndReconcileJson must return a JSON object string parseable as the response contract.');
+        ResultBankEntryNo := ReadInt(Response, 'bankAccountLedgerEntryNo');
+        ResultMatched := ReadBool(Response, 'reconciliationLineMatched');
+
+        // [THEN] The composite really happened through the text boundary: a real open bank entry for the
+        // payment exists, the invoice closed, and the recon line is matched 1:1 — identical observable
+        // outcome to the JsonObject service test, proving the bound action's delegate is wired end to end.
+        Assert.AreNotEqual(
+            0, ResultBankEntryNo,
+            'The text boundary must return a non-zero Bank Account Ledger Entry No. for the posted receipt.');
+        Assert.IsTrue(
+            BankAccLedgerEntry.Get(ResultBankEntryNo),
+            'A Bank Account Ledger Entry with the returned No. must exist (the payment must have posted).');
+        Assert.AreEqual(
+            BankAccount."No.", BankAccLedgerEntry."Bank Account No.",
+            'The created Bank Account Ledger Entry must belong to the payment bank account.');
+        Assert.AreEqual(
+            InvoiceAmount, Abs(BankAccLedgerEntry.Amount),
+            'The Bank Account Ledger Entry amount must equal the posted payment amount.');
+        Assert.IsTrue(
+            BankAccLedgerEntry.Open,
+            'The Bank Account Ledger Entry must remain open (matched, not yet statement-posted).');
+
+        CustLedgerEntry.Get(AppliedCustLedgerEntryNo);
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        Assert.AreEqual(
+            0, CustLedgerEntry."Remaining Amount",
+            'The applied invoice must be fully paid (Remaining Amount = 0) after the text-boundary call.');
+
+        BankAccReconLine.Get(
+            BankAccReconLine."Statement Type"::"Bank Reconciliation",
+            BankAccount."No.", StatementNo, StatementLineNo);
+        Assert.AreEqual(
+            1, BankAccReconLine."Applied Entries",
+            'The reconciliation line must have exactly one applied bank ledger entry after the text-boundary call.');
+        Assert.AreEqual(
+            0, BankAccReconLine.Difference,
+            'The reconciliation line difference must be zero once the entry is matched.');
+        Assert.IsTrue(
+            ResultMatched,
+            'The response must report reconciliationLineMatched = true once the line is matched.');
+    end;
+
+    [Test]
     procedure PostAndReconcile_MultiInvoice()
     var
         Customer: Record Customer;

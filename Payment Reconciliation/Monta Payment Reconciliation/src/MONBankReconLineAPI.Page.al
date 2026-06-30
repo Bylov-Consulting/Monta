@@ -113,4 +113,23 @@ page 50205 "MON Bank Recon Line API"
         // never see rows from a concurrent bank-reconciliation transaction that could later roll back.
         Rec.ReadIsolation := IsolationLevel::ReadCommitted;
     end;
+
+    /// <summary>
+    /// PRIMARY agent write path. OData V4 bound action exposed on this API entity:
+    /// POST .../api/monta/paymentReconciliation/v1.0/companies(&lt;id&gt;)/bankReconciliationLines(&lt;id&gt;)/Microsoft.NAV.postAndReconcile
+    /// with body { "request": "&lt;PostAndReconcile request JSON, as a string&gt;" }. Returns the
+    /// PostAndReconcile response JSON (bankAccountLedgerEntryNo + reconciliationLineMatched) as a string
+    /// in the OData action result's "value". The action is bound to the bank-reconciliation LINE entity
+    /// because its full identity (bankAccountNo/statementNo/statementLineNo) IS this table's key, so the
+    /// agent reads a line here and posts the action on that exact line. THIN delegation only — all logic
+    /// lives in the fully-unit-tested service codeunit. JSON is carried as Edm.String because JsonObject
+    /// is not an OData-serialisable AL action parameter type.
+    /// </summary>
+    [ServiceEnabled]
+    procedure postAndReconcile(request: Text): Text
+    var
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+    begin
+        exit(PmtReconService.PostAndReconcileJson(request));
+    end;
 }
