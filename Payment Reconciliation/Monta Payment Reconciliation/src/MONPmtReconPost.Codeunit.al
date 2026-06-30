@@ -6,6 +6,8 @@ codeunit 50200 "MON Pmt Recon Post"
         PaymentAmountErr: Label 'The payment amount must be greater than zero.';
         BankEntryNotFoundErr: Label 'The payment posting did not create the expected Bank Account Ledger Entry.';
         BankEntryNotFoundDetailTxt: Label 'No Bank Account Ledger Entry was created on bank account %1 for document %2 after posting the customer payment.', Comment = '%1 = Bank Account No., %2 = Document No.';
+        ClosedEntryErr: Label 'Customer ledger entry %1 is closed and cannot be settled by this payment.', Comment = '%1 = Cust. Ledger Entry No.';
+        CustomerMismatchErr: Label 'Customer ledger entry %1 does not belong to customer %2.', Comment = '%1 = Cust. Ledger Entry No., %2 = Customer No.';
 
     /// <summary>
     /// Posts an incoming customer payment that balances to a Bank Account — creating a Bank
@@ -136,8 +138,12 @@ codeunit 50200 "MON Pmt Recon Post"
         Customer.Get(CustomerNo);
         BankAccount.SetLoadFields("No.");
         BankAccount.Get(BankAccountNo);
-        CustLedgerEntry.SetLoadFields("Entry No.");
+        CustLedgerEntry.SetLoadFields("Customer No.", Open);
         CustLedgerEntry.Get(AppliesToCustLedgerEntryNo);
+        if CustLedgerEntry."Customer No." <> CustomerNo then
+            Error(CustomerMismatchErr, AppliesToCustLedgerEntryNo, CustomerNo);
+        if not CustLedgerEntry.Open then
+            Error(ClosedEntryErr, AppliesToCustLedgerEntryNo);
         GenJournalBatch.Get(GenJnlTemplateName, GenJnlBatchName);
     end;
 }
