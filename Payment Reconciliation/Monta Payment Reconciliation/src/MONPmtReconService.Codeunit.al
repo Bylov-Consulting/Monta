@@ -242,6 +242,10 @@ codeunit 50202 "MON Pmt Recon Service"
         this.ValidateRequiredField(Request, 'statementNo');
         this.ValidateRequiredField(Request, 'journalTemplateName');
         this.ValidateRequiredField(Request, 'journalBatchName');
+        // statementLineNo is required (and one third of the recon-line / idempotency key). GetInt defaults a
+        // missing/blank value to 0, which is never a real statement line no., so 0 means "missing".
+        if this.GetInt(Request, 'statementLineNo') = 0 then
+            Error(RequiredFieldErr, 'statementLineNo');
 
         // (2) payments must be present, an array, and non-empty.
         if not Request.Get('payments', PaymentsTok) then
