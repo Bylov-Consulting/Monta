@@ -604,6 +604,239 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
             'PostAndReconcile must report reconciliationLineMatched = true once the line is matched.');
     end;
 
+    [Test]
+    procedure PostAndReconcile_IdempotentReplay()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        BankAccReconciliation: Record "Bank Acc. Reconciliation";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Response1: JsonObject;
+        Response2: JsonObject;
+        AppliedCustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+        StatementAmount: Decimal;
+        BankEntryNo1: Integer;
+        BankEntryNo2: Integer;
+        ResultMatched2: Boolean;
+    begin
+        // [SCENARIO] Slice 7 (idempotent replay): the idempotency key is the reconciliation line
+        // identity (Bank Account No., Statement No., Statement Line No.). Calling PostAndReconcile a
+        // SECOND time with the SAME request (same recon line + same payload/hash) must NOT post again:
+        // it returns the SAME bankAccountLedgerEntryNo as the first call, posts NO additional payment
+        // (exactly ONE bank entry, ONE customer payment), and leaves the recon line matched exactly once.
+        // One customer / one invoice; no write-offs.
+
+        // [GIVEN] A customer with a posted sales invoice of amount X and its open Cust. Ledger Entry.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), AppliedCustLedgerEntryNo, InvoiceAmount);
+
+        // [GIVEN] A FRESH bank account + journal — a fresh bank account means a simple SetRange+Count on
+        // Bank Account Ledger Entry isolates exactly the entries this test posts (so "exactly one" is sound).
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+
+        // [GIVEN] A standard Bank Acc. Reconciliation with ONE UNMATCHED line whose Statement Amount = X.
+        StatementAmount := InvoiceAmount;
+        LibraryERM.CreateBankAccReconciliation(
+            BankAccReconciliation, BankAccount."No.",
+            BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+        LibraryERM.CreateBankAccReconciliationLn(BankAccReconLine, BankAccReconciliation);
+        BankAccReconLine.Validate("Statement Amount", StatementAmount);
+        BankAccReconLine.Difference := StatementAmount; // unmatched: nothing applied yet
+        BankAccReconLine.Modify(true);
+        StatementNo := BankAccReconLine."Statement No.";
+        StatementLineNo := BankAccReconLine."Statement Line No.";
+
+        // [GIVEN] Guard the starting state so the post-conditions can only be reached by PostAndReconcile.
+        Assert.AreEqual(
+            0, BankAccReconLine."Applied Entries",
+            'Precondition: the reconciliation line must start with no applied entries.');
+        Assert.AreEqual(
+            StatementAmount, BankAccReconLine.Difference,
+            'Precondition: the full statement amount must be outstanding before the composite call.');
+
+        // [WHEN] The SAME request object/content is issued TWICE (built ONCE so the payload/hash is
+        // byte-for-byte identical between calls — that identity is what the replay path keys on).
+        Request := BuildRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer."No.", AppliedCustLedgerEntryNo, InvoiceAmount);
+        Response1 := PmtReconService.PostAndReconcile(Request);
+        Response2 := PmtReconService.PostAndReconcile(Request);
+
+        BankEntryNo1 := ReadInt(Response1, 'bankAccountLedgerEntryNo');
+        BankEntryNo2 := ReadInt(Response2, 'bankAccountLedgerEntryNo');
+        ResultMatched2 := ReadBool(Response2, 'reconciliationLineMatched');
+
+        // [THEN] The replay returns the SAME bank ledger entry as the first call — no new post. Today the
+        // second call never reaches here (it throws in ValidateRequest: the invoice CLE is now closed),
+        // so this whole [THEN] block is unreachable under the current no-idempotency behaviour -> RED.
+        Assert.AreNotEqual(
+            0, BankEntryNo1,
+            'The first call must return a non-zero Bank Account Ledger Entry No. for the posted receipt.');
+        Assert.AreEqual(
+            BankEntryNo1, BankEntryNo2,
+            'Replay must return the SAME Bank Account Ledger Entry No. as the first call (no second post).');
+
+        // [THEN] EXACTLY ONE Bank Account Ledger Entry exists on the (fresh) bank account: no double-post.
+        BankAccLedgerEntry.SetRange("Bank Account No.", BankAccount."No.");
+        Assert.AreEqual(
+            1, BankAccLedgerEntry.Count(),
+            'Exactly one Bank Account Ledger Entry must exist on the bank account (the replay must not post a second).');
+
+        // [THEN] No additional customer payment was posted: exactly ONE Payment Cust. Ledger Entry exists
+        // for the customer (a second post would create a second payment entry and a second application).
+        Assert.AreEqual(
+            1, CustomerPaymentEntryCount(Customer."No."),
+            'Exactly one customer Payment ledger entry must exist (the invoice is applied by a SINGLE payment, not two).');
+
+        // [THEN] The applied invoice is closed — settled by that single payment application.
+        CustLedgerEntry.Get(AppliedCustLedgerEntryNo);
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        Assert.AreEqual(
+            0, CustLedgerEntry."Remaining Amount",
+            'The applied invoice must be fully paid (Remaining Amount = 0) after the replay.');
+        Assert.IsFalse(
+            CustLedgerEntry.Open,
+            'The applied invoice must be closed (Open = false) — applied exactly once.');
+
+        // [THEN] The reconciliation line is matched exactly once: Applied Entries = 1, Difference = 0
+        // (the replay must not add a second applied entry).
+        BankAccReconLine.Get(
+            BankAccReconLine."Statement Type"::"Bank Reconciliation",
+            BankAccount."No.", StatementNo, StatementLineNo);
+        Assert.AreEqual(
+            1, BankAccReconLine."Applied Entries",
+            'The reconciliation line must carry exactly one applied bank ledger entry after the replay.');
+        Assert.AreEqual(
+            0, BankAccReconLine.Difference,
+            'The reconciliation line difference must be zero and unchanged by the replay.');
+
+        // [THEN] The replay response still reports the line as matched.
+        Assert.IsTrue(
+            ResultMatched2,
+            'PostAndReconcile must report reconciliationLineMatched = true on the idempotent replay.');
+    end;
+
+    [Test]
+    procedure PostAndReconcile_ConflictRejected()
+    var
+        Customer1: Record Customer;
+        Customer2: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        BankAccReconciliation: Record "Bank Acc. Reconciliation";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request1: JsonObject;
+        Request2: JsonObject;
+        Response1: JsonObject;
+        CustLedgerEntryNo1: Integer;
+        CustLedgerEntryNo2: Integer;
+        Amount1: Decimal;
+        Amount2: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+        BankEntryNo1: Integer;
+    begin
+        // [SCENARIO] Slice 7 (conflict): calling PostAndReconcile AGAIN for the SAME reconciliation line L
+        // but with a DIFFERENT payload (different request hash) must be REJECTED with a clear error — it
+        // must NOT double-post or double-match. Two customers, one invoice each.
+
+        // [GIVEN] TWO customers, each with ONE posted invoice of a distinct amount (X1, X2). Distinct
+        // unit-price ranges guarantee X1 <> X2 (so the two payloads genuinely differ -> different hash).
+        LibrarySales.CreateCustomer(Customer1);
+        LibrarySales.CreateCustomer(Customer2);
+        CreatePostedInvoiceForCustomer(
+            Customer1."No.", LibraryRandom.RandDecInRange(100, 500, 2), CustLedgerEntryNo1, Amount1);
+        CreatePostedInvoiceForCustomer(
+            Customer2."No.", LibraryRandom.RandDecInRange(600, 1000, 2), CustLedgerEntryNo2, Amount2);
+
+        // [GIVEN] Sanity: the two requests will differ (distinct customers, entries and amounts).
+        Assert.AreNotEqual(
+            Amount1, Amount2,
+            'Precondition: the two payloads must differ so the second request has a different hash.');
+
+        // [GIVEN] A fresh bank account + journal (fresh bank -> a simple Count isolates this test).
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+
+        // [GIVEN] ONE reconciliation line L; Statement Amount = X1 so the FIRST request reconciles cleanly.
+        LibraryERM.CreateBankAccReconciliation(
+            BankAccReconciliation, BankAccount."No.",
+            BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+        LibraryERM.CreateBankAccReconciliationLn(BankAccReconLine, BankAccReconciliation);
+        BankAccReconLine.Validate("Statement Amount", Amount1);
+        BankAccReconLine.Difference := Amount1; // unmatched: nothing applied yet
+        BankAccReconLine.Modify(true);
+        StatementNo := BankAccReconLine."Statement No.";
+        StatementLineNo := BankAccReconLine."Statement Line No.";
+
+        // [GIVEN] Two DIFFERENT requests targeting the SAME recon line L = (bank, StatementNo, LineNo).
+        // Request1: customer 1 / invoice 1 / X1. Request2: customer 2 / invoice 2 / X2 — same recon line,
+        // different payload (and different hash).
+        Request1 := BuildRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer1."No.", CustLedgerEntryNo1, Amount1);
+        Request2 := BuildRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer2."No.", CustLedgerEntryNo2, Amount2);
+
+        // [WHEN] The first call succeeds and reconciles L.
+        Response1 := PmtReconService.PostAndReconcile(Request1);
+        BankEntryNo1 := ReadInt(Response1, 'bankAccountLedgerEntryNo');
+        Assert.AreNotEqual(
+            0, BankEntryNo1,
+            'Arrange: the first call must reconcile the line (non-zero Bank Account Ledger Entry No.).');
+
+        // [WHEN] A conflicting second call for the SAME recon line with a DIFFERENT payload is issued.
+        asserterror PmtReconService.PostAndReconcile(Request2);
+
+        // [THEN] It is rejected with the recon-line-already-reconciled conflict. GREEN raises
+        // 'Reconciliation line %1/%2 has already been reconciled by a different request.' — assert on the
+        // distinctive substring. Today there is NO conflict check (the second call either posts+matches a
+        // second entry or throws an unrelated error), so this substring is ABSENT -> RED.
+        Assert.ExpectedError('already been reconciled');
+
+        // [THEN] No second bank entry survives the rejected call: exactly one Bank Account Ledger Entry on
+        // the (fresh) bank account (GREEN rejects BEFORE posting, so the second receipt is never created).
+        BankAccLedgerEntry.SetRange("Bank Account No.", BankAccount."No.");
+        Assert.AreEqual(
+            1, BankAccLedgerEntry.Count(),
+            'The conflicting call must NOT post a second Bank Account Ledger Entry.');
+    end;
+
+    /// <summary>
+    /// Number of POSTED customer Payment ledger entries for the given customer. The customer is created
+    /// fresh per test, so counting all its Payment-type Cust. Ledger Entries isolates the payment(s) this
+    /// test posts: a single PostAndReconcile posts exactly one customer payment line, so a value > 1 proves
+    /// a second (non-idempotent) post occurred.
+    /// </summary>
+    local procedure CustomerPaymentEntryCount(CustomerNo: Code[20]): Integer
+    var
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+    begin
+        CustLedgerEntry.SetRange("Customer No.", CustomerNo);
+        CustLedgerEntry.SetRange("Document Type", CustLedgerEntry."Document Type"::Payment);
+        exit(CustLedgerEntry.Count());
+    end;
+
     /// <summary>
     /// Creates a G/L Account that ALLOWS direct posting (required so a balancing G/L journal line can
     /// post the write-off to it) and verifies the flag actually stuck. No Gen./VAT posting groups are
