@@ -1099,6 +1099,59 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
     end;
 
     [Test]
+    procedure PostAndReconcile_RejectsMissingStmtLine()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Payment: JsonObject;
+        AppliesToEntry: JsonObject;
+        Payments: JsonArray;
+        AppliesTo: JsonArray;
+        CustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+    begin
+        // [SCENARIO] Slice 3v: statementLineNo is one third of the reconciliation-line / idempotency key and is
+        // required. When omitted, GetInt defaults it to 0; today the call posts then fails matching the
+        // non-existent recon line 0 with an opaque "...does not exist" error. It must instead be rejected up
+        // front with the specific "missing required field" message.
+
+        // [GIVEN] A real customer + open invoice + valid bank/journal/recon line — the ONLY defect is that
+        // statementLineNo is omitted from the request body.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), CustLedgerEntryNo, InvoiceAmount);
+        ArrangeBankJournalRecon(
+            BankAccount, GenJournalTemplate, GenJournalBatch, InvoiceAmount, StatementNo, StatementLineNo);
+
+        // [GIVEN] A valid single payment...
+        AppliesToEntry.Add('custLedgerEntryNo', CustLedgerEntryNo);
+        AppliesToEntry.Add('amount', InvoiceAmount);
+        AppliesTo.Add(AppliesToEntry);
+        Payment.Add('customerNo', Customer."No.");
+        Payment.Add('appliesTo', AppliesTo);
+        Payments.Add(Payment);
+
+        // [GIVEN] ...but a request header that OMITS statementLineNo (all other header keys present).
+        Request.Add('bankAccountNo', BankAccount."No.");
+        Request.Add('statementNo', StatementNo);
+        Request.Add('journalTemplateName', GenJournalTemplate.Name);
+        Request.Add('journalBatchName', GenJournalBatch.Name);
+        Request.Add('externalDocumentNo', NewExternalDocNo());
+        Request.Add('payments', Payments);
+
+        // [WHEN/THEN] Rejected up front. Today statementLineNo defaults to 0 and the failure surfaces only as
+        // matching the non-existent recon line 0 ("...does not exist"), lacking "missing required field" -> RED.
+        asserterror PmtReconService.PostAndReconcile(Request);
+        Assert.ExpectedError('missing required field');
+    end;
+
+    [Test]
     procedure PostAndReconcile_RejectsDuplicateApply()
     var
         Customer: Record Customer;
