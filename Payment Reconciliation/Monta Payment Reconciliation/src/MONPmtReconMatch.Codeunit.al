@@ -17,9 +17,40 @@ codeunit 50201 "MON Pmt Recon Match"
     /// <param name="StatementLineNo">Statement Line No. of the reconciliation line to apply the entry to.</param>
     /// <param name="BankAccountLedgerEntryNo">Entry No. of the open Bank Account Ledger Entry to match.</param>
     procedure MatchBankEntryToReconLine(BankAccountNo: Code[20]; StatementNo: Code[20]; StatementLineNo: Integer; BankAccountLedgerEntryNo: Integer)
+    var
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        BankAccLedgEntry: Record "Bank Account Ledger Entry";
+        BankAccEntrySetReconNo: Codeunit "Bank Acc. Entry Set Recon.-No.";
+        Relation: Option "One-to-One","One-to-Many","Many-to-One";
     begin
-        // RED stub: intentionally records NO match — leaves the reconciliation line and the bank
-        // ledger entry unchanged so the slice-2 test fails. The GREEN phase wires this to
-        // Codeunit "Bank Acc. Entry Set Recon.-No.".ApplyEntries(BankAccReconLine, BankAccLedgEntry, Relation::OneToOne).
+        // Load the standard reconciliation line (table 274, PK = Statement Type, Bank Account No.,
+        // Statement No., Statement Line No.) and the open bank ledger entry (table 271) by their IDs.
+        BankAccReconLine.Get(
+            BankAccReconLine."Statement Type"::"Bank Reconciliation",
+            BankAccountNo, StatementNo, StatementLineNo);
+        BankAccLedgEntry.Get(BankAccountLedgerEntryNo);
+
+        // Standard one-entry <-> one-line match. Public codeunit 375 "Bank Acc. Entry Set Recon.-No."
+        // does exactly what the standard Apply action does: SetReconNo stamps the ledger entry's
+        // Statement No./Line No. and sets Statement Status = "Bank Acc. Entry Applied" (the entry
+        // stays Open), then the line's Applied Amount/Applied Entries are raised and Statement Amount
+        // is re-validated so Difference returns to zero. The Relation Option mirrors the base-app
+        // caller codeunit 1252 "Match Bank Rec. Lines", which declares the same local Option and
+        // passes "One-to-One" for a single entry matched to a single line.
+        BankAccEntrySetReconNo.ApplyEntries(BankAccReconLine, BankAccLedgEntry, Relation::"One-to-One");
+
+        // Continia Statement Intelligence guard — PROD-ONLY, intentionally NOT covered by the
+        // standard-BC container test (no Continia in the container). Codeunit 375 persists the line
+        // via Modify(false), which does NOT fire table 274's OnModify trigger. In production this app
+        // runs alongside Continia, whose table-extension OnModify subscriber repaints a derived
+        // "CPM Status" field, so we must make the line's OnModify fire. We re-Get the line exactly as
+        // the standard apply committed it and Modify(true): because Get sets xRec = Rec, the
+        // "Statement Amount" is unchanged between xRec and Rec, so table 274's OnModify
+        // ("if xRec.\"Statement Amount\" <> \"Statement Amount\" then RemoveApplication") does NOT undo
+        // the match — every standard field the test asserts is preserved while the trigger still runs.
+        BankAccReconLine.Get(
+            BankAccReconLine."Statement Type"::"Bank Reconciliation",
+            BankAccountNo, StatementNo, StatementLineNo);
+        BankAccReconLine.Modify(true);
     end;
 }
