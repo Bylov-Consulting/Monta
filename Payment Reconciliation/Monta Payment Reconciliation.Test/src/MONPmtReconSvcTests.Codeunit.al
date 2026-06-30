@@ -448,6 +448,229 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
             'PostAndReconcile must report reconciliationLineMatched = true once the line is matched.');
     end;
 
+    [Test]
+    procedure PostAndReconcile_WithWriteOff()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        WriteOffGLAccount: Record "G/L Account";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        BankAccReconciliation: Record "Bank Acc. Reconciliation";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Response: JsonObject;
+        AppliedCustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        WriteOffAmount: Decimal;
+        CashAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+        ResultBankEntryNo: Integer;
+        ResultMatched: Boolean;
+    begin
+        // [SCENARIO] Slice 6: a customer settles an invoice IN FULL but pays LESS cash than the invoice;
+        // the agent supplies a G/L account to absorb the difference (a payment-difference write-off). The
+        // invoice must close fully (Applies-to amount = invoice remaining X), the write-off difference W
+        // must post to the agent's G/L account, and — by design — write-offs NEVER hit the bank, so the
+        // single Bank Account Ledger Entry equals the CASH (X - W) = the statement-line amount, keeping
+        // the recon match 1:1. One customer / one invoice; no VAT / bad-debt logic.
+
+        // [GIVEN] A customer with ONE posted sales invoice of amount X; capture its open Cust. Ledger
+        // Entry No. and remaining amount X (the full invoice value, settled in full by the apply).
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), AppliedCustLedgerEntryNo, InvoiceAmount);
+
+        // [GIVEN] A bank account and a general journal template + batch for the payment.
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+
+        // [GIVEN] A G/L account the agent nominates for the write-off, explicitly set to allow DIRECT
+        // POSTING (a balancing G/L journal line cannot post to an account with Direct Posting = false).
+        // No Gen./VAT posting groups are set, so the write-off posts with no VAT (slice-6 scope).
+        CreateDirectPostingGLAccount(WriteOffGLAccount);
+
+        // [GIVEN] A small write-off W with 0 < W < X (the 10..50 range is strictly below the 100.. invoice
+        // floor, so the under-payment is well-formed) and the CASH actually received = X - W.
+        WriteOffAmount := LibraryRandom.RandDecInRange(10, 50, 2);
+        CashAmount := InvoiceAmount - WriteOffAmount;
+
+        // [GIVEN] Sanity: the write-off is a genuine under-payment (0 < W < X) so cash (X - W) is strictly
+        // less than the invoice — the whole point of the slice is that bank <> invoice.
+        Assert.IsTrue(
+            (WriteOffAmount > 0) and (WriteOffAmount < InvoiceAmount),
+            'Precondition: the write-off W must satisfy 0 < W < X so the payment is a real under-payment.');
+
+        // [GIVEN] A standard Bank Acc. Reconciliation with ONE UNMATCHED line whose Statement Amount is
+        // the CASH received (X - W) — write-offs never reach the bank, so the statement shows only cash.
+        // Difference = X - W, Applied Entries = 0.
+        LibraryERM.CreateBankAccReconciliation(
+            BankAccReconciliation, BankAccount."No.",
+            BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+        LibraryERM.CreateBankAccReconciliationLn(BankAccReconLine, BankAccReconciliation);
+        BankAccReconLine.Validate("Statement Amount", CashAmount);
+        BankAccReconLine.Difference := CashAmount; // unmatched: nothing applied yet
+        BankAccReconLine.Modify(true);
+        StatementNo := BankAccReconLine."Statement No.";
+        StatementLineNo := BankAccReconLine."Statement Line No.";
+
+        // [GIVEN] Guard the starting state so the post-conditions can only be reached by PostAndReconcile.
+        Assert.AreEqual(
+            0, BankAccReconLine."Applied Entries",
+            'Precondition: the reconciliation line must start with no applied entries.');
+        Assert.AreEqual(
+            CashAmount, BankAccReconLine.Difference,
+            'Precondition: the full cash amount (X - W) must be outstanding before the composite call.');
+        Assert.AreEqual(
+            0, WriteOffGLEntryAmount(WriteOffGLAccount."No."),
+            'Precondition: the fresh write-off G/L account must have no G/L entries before the call.');
+
+        // [WHEN] The agent issues a single PostAndReconcile call: payments[0] applies the FULL invoice X
+        // to its CLE AND carries writeOff[0] = { glAccountNo, amount: W }.
+        Request := BuildWriteOffRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer."No.", AppliedCustLedgerEntryNo, InvoiceAmount,
+            WriteOffGLAccount."No.", WriteOffAmount);
+        Response := PmtReconService.PostAndReconcile(Request);
+
+        ResultBankEntryNo := ReadInt(Response, 'bankAccountLedgerEntryNo');
+        ResultMatched := ReadBool(Response, 'reconciliationLineMatched');
+
+        // [THEN] The response names a real, open Bank Account Ledger Entry on the bank.
+        Assert.AreNotEqual(
+            0, ResultBankEntryNo,
+            'PostAndReconcile must return a non-zero Bank Account Ledger Entry No. for the posted receipt.');
+        Assert.IsTrue(
+            BankAccLedgerEntry.Get(ResultBankEntryNo),
+            'A Bank Account Ledger Entry with the returned No. must exist (the payment must have posted).');
+        Assert.AreEqual(
+            BankAccount."No.", BankAccLedgerEntry."Bank Account No.",
+            'The created Bank Account Ledger Entry must belong to the payment bank account.');
+
+        // [THEN] The bank entry equals the CASH (X - W), NOT the invoice X. Today writeOff is ignored, so
+        // the bank line is posted for the full Sum-of-applies X -> |Amount| = X <> X - W: this is the
+        // FIRST assertion that fails under the current no-write-off behaviour.
+        Assert.AreEqual(
+            CashAmount, Abs(BankAccLedgerEntry.Amount),
+            'The Bank Account Ledger Entry amount must equal the CASH received (X - W), not the invoice X.');
+        Assert.IsTrue(
+            BankAccLedgerEntry.Open,
+            'The Bank Account Ledger Entry must remain open (matched, not yet statement-posted).');
+
+        // [THEN] The invoice is settled in FULL — re-Get + CalcFields. (The full X is applied, so this
+        // closes even today; it pins that the write-off does NOT shrink the customer settlement.)
+        CustLedgerEntry.Get(AppliedCustLedgerEntryNo);
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        Assert.AreEqual(
+            0, CustLedgerEntry."Remaining Amount",
+            'The invoice must be fully paid (Remaining Amount = 0): the apply settles the full X.');
+        Assert.IsFalse(
+            CustLedgerEntry.Open,
+            'The invoice must be closed (Open = false) — settled in full despite the under-payment.');
+
+        // [THEN] The write-off posted to the agent's G/L account: net G/L Entry Amount on that (fresh)
+        // account = +W. For an under-payment write-off the difference is a DEBIT to the G/L account, and
+        // a positive Gen. Journal Line Amount on a G/L Account posts a positive (debit) G/L Entry Amount,
+        // so the net is +W. Today no write-off line is posted -> the net is 0 <> W.
+        Assert.AreEqual(
+            WriteOffAmount, WriteOffGLEntryAmount(WriteOffGLAccount."No."),
+            'The write-off G/L account must carry a net G/L Entry Amount of +W (the difference debited to it).');
+
+        // [THEN] The reconciliation line is fully matched to the ONE bank entry for the CASH: Applied
+        // Entries = 1, Applied Amount = X - W, Difference = 0. Today the bank entry is X, so Applied
+        // Amount = X and Difference = (X - W) - X = -W <> 0.
+        BankAccReconLine.Get(
+            BankAccReconLine."Statement Type"::"Bank Reconciliation",
+            BankAccount."No.", StatementNo, StatementLineNo);
+        Assert.AreEqual(
+            1, BankAccReconLine."Applied Entries",
+            'The reconciliation line must have exactly one applied bank ledger entry (1:1 with the cash receipt).');
+        Assert.AreEqual(
+            CashAmount, BankAccReconLine."Applied Amount",
+            'The applied amount must equal the CASH statement amount (X - W).');
+        Assert.AreEqual(
+            0, BankAccReconLine.Difference,
+            'The reconciliation line difference must be zero once the cash receipt is matched.');
+
+        // [THEN] The response explicitly reports the line as matched.
+        Assert.IsTrue(
+            ResultMatched,
+            'PostAndReconcile must report reconciliationLineMatched = true once the line is matched.');
+    end;
+
+    /// <summary>
+    /// Creates a G/L Account that ALLOWS direct posting (required so a balancing G/L journal line can
+    /// post the write-off to it) and verifies the flag actually stuck. No Gen./VAT posting groups are
+    /// assigned, so a direct posting to it carries no VAT — matching the slice-6 "no VAT logic" scope.
+    /// </summary>
+    local procedure CreateDirectPostingGLAccount(var GLAccount: Record "G/L Account")
+    begin
+        LibraryERM.CreateGLAccount(GLAccount);
+        GLAccount.Validate("Direct Posting", true);
+        GLAccount.Modify(true);
+        Assert.IsTrue(
+            GLAccount."Direct Posting",
+            'Arrange: the write-off G/L account must allow direct posting.');
+    end;
+
+    /// <summary>
+    /// Net G/L Entry Amount booked on the given G/L account. The account is created fresh per test, so
+    /// summing ALL its entries isolates the write-off posting (no Document No. filter needed). Sign
+    /// convention: a positive (debit) G/L Entry Amount returns positive.
+    /// </summary>
+    local procedure WriteOffGLEntryAmount(GLAccountNo: Code[20]): Decimal
+    var
+        GLEntry: Record "G/L Entry";
+    begin
+        GLEntry.SetRange("G/L Account No.", GLAccountNo);
+        GLEntry.CalcSums(Amount);
+        exit(GLEntry.Amount);
+    end;
+
+    /// <summary>
+    /// Builds a slice-6 PostAndReconcile request: ONE payments entry with ONE appliesTo entry (the full
+    /// invoice X) AND ONE writeOff entry { glAccountNo, amount: W }. Mirrors the stable JSON contract
+    /// documented on codeunit "MON Pmt Recon Service".
+    /// </summary>
+    local procedure BuildWriteOffRequest(BankAccountNo: Code[20]; StatementNo: Code[20]; StatementLineNo: Integer; JournalTemplateName: Code[10]; JournalBatchName: Code[10]; ExternalDocumentNo: Code[35]; CustomerNo: Code[20]; CustLedgerEntryNo: Integer; AppliesAmount: Decimal; WriteOffGLAccountNo: Code[20]; WriteOffAmount: Decimal): JsonObject
+    var
+        Request: JsonObject;
+        Payment: JsonObject;
+        AppliesToEntry: JsonObject;
+        WriteOffEntry: JsonObject;
+        Payments: JsonArray;
+        AppliesTo: JsonArray;
+        WriteOff: JsonArray;
+    begin
+        AppliesToEntry.Add('custLedgerEntryNo', CustLedgerEntryNo);
+        AppliesToEntry.Add('amount', AppliesAmount);
+        AppliesTo.Add(AppliesToEntry);
+
+        WriteOffEntry.Add('glAccountNo', WriteOffGLAccountNo);
+        WriteOffEntry.Add('amount', WriteOffAmount);
+        WriteOff.Add(WriteOffEntry);
+
+        Payment.Add('customerNo', CustomerNo);
+        Payment.Add('appliesTo', AppliesTo);
+        Payment.Add('writeOff', WriteOff);
+        Payments.Add(Payment);
+
+        Request.Add('bankAccountNo', BankAccountNo);
+        Request.Add('statementNo', StatementNo);
+        Request.Add('statementLineNo', StatementLineNo);
+        Request.Add('journalTemplateName', JournalTemplateName);
+        Request.Add('journalBatchName', JournalBatchName);
+        Request.Add('externalDocumentNo', ExternalDocumentNo);
+        Request.Add('payments', Payments);
+        exit(Request);
+    end;
+
     /// <summary>
     /// Builds a slice-5 PostAndReconcile request: TWO payments entries (two customers), each carrying
     /// ONE appliesTo entry (one invoice per customer). Mirrors the stable JSON contract documented on
