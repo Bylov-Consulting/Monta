@@ -950,6 +950,250 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         Assert.ExpectedError('already been reconciled');
     end;
 
+    [Test]
+    procedure PostAndReconcile_RejectsNoPayments()
+    var
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Payments: JsonArray;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+    begin
+        // [SCENARIO] Slice 3v (request-schema validation): the agent caller must get a clear, actionable
+        // error BEFORE any posting when the request carries no payments at all. An EMPTY payments array
+        // (the "nothing to post" shape) must be rejected with the specific "at least one payment" message
+        // — not the opaque downstream error today's code raises once it tries to post an empty document.
+
+        // [GIVEN] A valid bank account, journal template + batch and ONE unmatched reconciliation line, so
+        // every header reference resolves and the ONLY defect under test is the absence of payments.
+        ArrangeBankJournalRecon(
+            BankAccount, GenJournalTemplate, GenJournalBatch,
+            LibraryRandom.RandDecInRange(100, 1000, 2), StatementNo, StatementLineNo);
+
+        // [GIVEN] An otherwise valid request whose payments is an EMPTY array.
+        AddRequestHeader(
+            Request, BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+        Request.Add('payments', Payments); // empty: nothing to post
+
+        // [WHEN/THEN] PostAndReconcile must reject this up front with the no-payments validation error. Today
+        // the empty array flows into the poster, whose ValidateRequest raises NoAppliesEntriesErr ("At least
+        // one customer ledger entry must be supplied for the payment.") — a DIFFERENT message that does NOT
+        // contain "at least one payment", so the substring is absent today -> RED.
+        asserterror PmtReconService.PostAndReconcile(Request);
+        Assert.ExpectedError('at least one payment');
+    end;
+
+    [Test]
+    procedure PostAndReconcile_RejectsPaymentNoApplies()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        WriteOffGLAccount: Record "G/L Account";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Payment: JsonObject;
+        WriteOffEntry: JsonObject;
+        Payments: JsonArray;
+        AppliesTo: JsonArray;
+        WriteOff: JsonArray;
+        CustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+    begin
+        // [SCENARIO] Slice 3v: a payment that applies to NO customer ledger entry must be rejected, EVEN
+        // when it carries write-offs. This closes the slice-6 gap where an all-write-off / no-apply payment
+        // posts a negative/cryptic bank line instead of erroring. The caller must get the specific
+        // "at least one customer ledger entry" message before any posting.
+
+        // [GIVEN] A real customer with an open invoice (so customerNo is valid), a direct-posting write-off
+        // G/L account (so the write-off row itself is well-formed), and a valid bank/journal/recon line — so
+        // the ONLY defect is the empty appliesTo.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), CustLedgerEntryNo, InvoiceAmount);
+        CreateDirectPostingGLAccount(WriteOffGLAccount);
+        ArrangeBankJournalRecon(
+            BankAccount, GenJournalTemplate, GenJournalBatch, InvoiceAmount, StatementNo, StatementLineNo);
+
+        // [GIVEN] A payment with an EMPTY appliesTo but a non-empty writeOff (applies to nothing, only writes
+        // off) — the exact "all write-off, no apply rows" shape that otherwise posts a negative bank line.
+        WriteOffEntry.Add('glAccountNo', WriteOffGLAccount."No.");
+        WriteOffEntry.Add('amount', LibraryRandom.RandDecInRange(10, 50, 2));
+        WriteOff.Add(WriteOffEntry);
+        Payment.Add('customerNo', Customer."No.");
+        Payment.Add('appliesTo', AppliesTo); // empty: applies to nothing
+        Payment.Add('writeOff', WriteOff);
+        Payments.Add(Payment);
+
+        AddRequestHeader(
+            Request, BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+        Request.Add('payments', Payments);
+
+        // [WHEN/THEN] PostAndReconcile must reject the no-apply payment up front. Today the write-off row
+        // keeps the buffer non-empty, so ValidateRequest passes and the poster fails later on an unrelated
+        // opaque error (no Customer-Apply row to seed/group the document) — the "at least one customer ledger
+        // entry" substring is absent today -> RED.
+        asserterror PmtReconService.PostAndReconcile(Request);
+        Assert.ExpectedError('at least one customer ledger entry');
+    end;
+
+    [Test]
+    procedure PostAndReconcile_RejectsMissingHeader()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Payment: JsonObject;
+        AppliesToEntry: JsonObject;
+        Payments: JsonArray;
+        AppliesTo: JsonArray;
+        CustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+    begin
+        // [SCENARIO] Slice 3v: a required header field that is absent (or blank) must be rejected with the
+        // specific "missing required field" message naming the field, instead of an opaque downstream "does
+        // not exist" error. Representative case: bankAccountNo omitted entirely.
+
+        // [GIVEN] A real customer with an open invoice and a valid bank/journal/recon line — every value the
+        // request needs EXISTS, so the ONLY defect is that bankAccountNo is omitted from the request body.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), CustLedgerEntryNo, InvoiceAmount);
+        ArrangeBankJournalRecon(
+            BankAccount, GenJournalTemplate, GenJournalBatch, InvoiceAmount, StatementNo, StatementLineNo);
+
+        // [GIVEN] A valid single payment...
+        AppliesToEntry.Add('custLedgerEntryNo', CustLedgerEntryNo);
+        AppliesToEntry.Add('amount', InvoiceAmount);
+        AppliesTo.Add(AppliesToEntry);
+        Payment.Add('customerNo', Customer."No.");
+        Payment.Add('appliesTo', AppliesTo);
+        Payments.Add(Payment);
+
+        // [GIVEN] ...but a request header that OMITS bankAccountNo entirely (all other header keys present).
+        Request.Add('statementNo', StatementNo);
+        Request.Add('statementLineNo', StatementLineNo);
+        Request.Add('journalTemplateName', GenJournalTemplate.Name);
+        Request.Add('journalBatchName', GenJournalBatch.Name);
+        Request.Add('externalDocumentNo', NewExternalDocNo());
+        Request.Add('payments', Payments);
+
+        // [WHEN/THEN] PostAndReconcile must reject the missing field up front. Today bankAccountNo defaults to
+        // '' and the failure surfaces only later as BankAccount.Get('') -> "The Bank Account does not exist..."
+        // which does NOT contain "missing required field" -> RED.
+        asserterror PmtReconService.PostAndReconcile(Request);
+        Assert.ExpectedError('missing required field');
+    end;
+
+    [Test]
+    procedure PostAndReconcile_RejectsDuplicateApply()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Payment: JsonObject;
+        AppliesToEntry1: JsonObject;
+        AppliesToEntry2: JsonObject;
+        Payments: JsonArray;
+        AppliesTo: JsonArray;
+        CustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+    begin
+        // [SCENARIO] Slice 3v: the SAME customer ledger entry appearing more than once in one payment's
+        // appliesTo is a malformed request (it would double-apply / over-apply that entry) and must be
+        // rejected with the specific "appears more than once" message BEFORE any posting.
+
+        // [GIVEN] A real customer with ONE open invoice and a valid bank/journal/recon line — so the ONLY
+        // defect is the duplicated custLedgerEntryNo (a real, open entry, so the duplicate is the sole issue).
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), CustLedgerEntryNo, InvoiceAmount);
+        ArrangeBankJournalRecon(
+            BankAccount, GenJournalTemplate, GenJournalBatch, InvoiceAmount, StatementNo, StatementLineNo);
+
+        // [GIVEN] A single payment whose appliesTo lists the SAME custLedgerEntryNo TWICE.
+        AppliesToEntry1.Add('custLedgerEntryNo', CustLedgerEntryNo);
+        AppliesToEntry1.Add('amount', InvoiceAmount);
+        AppliesTo.Add(AppliesToEntry1);
+        AppliesToEntry2.Add('custLedgerEntryNo', CustLedgerEntryNo); // duplicate of the same entry
+        AppliesToEntry2.Add('amount', InvoiceAmount);
+        AppliesTo.Add(AppliesToEntry2);
+        Payment.Add('customerNo', Customer."No.");
+        Payment.Add('appliesTo', AppliesTo);
+        Payments.Add(Payment);
+
+        AddRequestHeader(
+            Request, BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+        Request.Add('payments', Payments);
+
+        // [WHEN/THEN] PostAndReconcile must reject the duplicate up front. Today there is no duplicate guard:
+        // both rows pass ValidateRequest (the entry is open and owned by the customer) and the entry is
+        // applied twice — over-applying / mis-posting, or failing with an unrelated posting error, but NEVER
+        // the "appears more than once" message; if no error is raised at all, asserterror itself fails. Either
+        // way the substring is absent today -> RED.
+        asserterror PmtReconService.PostAndReconcile(Request);
+        Assert.ExpectedError('appears more than once');
+    end;
+
+    /// <summary>
+    /// Arranges the non-payment scaffolding shared by the slice-3v validation tests: a fresh bank account, a
+    /// gen. journal template + batch, and ONE unmatched Bank Acc. Reconciliation line (Statement Type = Bank
+    /// Reconciliation) whose Statement Amount = StatementAmount. Returns the recon line identity so the header
+    /// references all resolve and only the request defect under test can cause the failure.
+    /// </summary>
+    local procedure ArrangeBankJournalRecon(var BankAccount: Record "Bank Account"; var GenJournalTemplate: Record "Gen. Journal Template"; var GenJournalBatch: Record "Gen. Journal Batch"; StatementAmount: Decimal; var StatementNo: Code[20]; var StatementLineNo: Integer)
+    var
+        BankAccReconciliation: Record "Bank Acc. Reconciliation";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+    begin
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        LibraryERM.CreateBankAccReconciliation(
+            BankAccReconciliation, BankAccount."No.",
+            BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+        LibraryERM.CreateBankAccReconciliationLn(BankAccReconLine, BankAccReconciliation);
+        BankAccReconLine.Validate("Statement Amount", StatementAmount);
+        BankAccReconLine.Difference := StatementAmount;
+        BankAccReconLine.Modify(true);
+        StatementNo := BankAccReconLine."Statement No.";
+        StatementLineNo := BankAccReconLine."Statement Line No.";
+    end;
+
+    /// <summary>
+    /// Adds the six stable header scalars (bankAccountNo, statementNo, statementLineNo, journalTemplateName,
+    /// journalBatchName, externalDocumentNo) to Request. The caller adds the 'payments' array separately, so
+    /// each validation test can attach whatever (well-formed or malformed) payments shape it needs.
+    /// </summary>
+    local procedure AddRequestHeader(var Request: JsonObject; BankAccountNo: Code[20]; StatementNo: Code[20]; StatementLineNo: Integer; JournalTemplateName: Code[10]; JournalBatchName: Code[10]; ExternalDocumentNo: Code[35])
+    begin
+        Request.Add('bankAccountNo', BankAccountNo);
+        Request.Add('statementNo', StatementNo);
+        Request.Add('statementLineNo', StatementLineNo);
+        Request.Add('journalTemplateName', JournalTemplateName);
+        Request.Add('journalBatchName', JournalBatchName);
+        Request.Add('externalDocumentNo', ExternalDocumentNo);
+    end;
+
     /// <summary>
     /// Number of POSTED customer Payment ledger entries for the given customer. The customer is created
     /// fresh per test, so counting all its Payment-type Cust. Ledger Entries isolates the payment(s) this
