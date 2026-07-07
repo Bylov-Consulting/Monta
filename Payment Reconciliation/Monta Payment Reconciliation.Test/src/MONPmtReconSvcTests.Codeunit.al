@@ -147,6 +147,198 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
     end;
 
     [Test]
+    procedure PostAndReconcile_PostsOnReconLineTransactionDate()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        BankAccReconciliation: Record "Bank Acc. Reconciliation";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Response: JsonObject;
+        AppliedCustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+        TransactionDate: Date;
+        StatementDate: Date;
+        ResultBankEntryNo: Integer;
+    begin
+        // [SCENARIO] The payment must post on the reconciliation line's Transaction Date — the date the
+        // cash actually moved at the bank — NOT WorkDate (today). Posting on today creates a date mismatch
+        // between the bank ledger entry and the statement it reconciles. This is the primary requirement:
+        // the whole balanced document (customer + bank legs) carries the line's Transaction Date.
+
+        // [GIVEN] A customer with a posted sales invoice and its open ledger entry.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), AppliedCustLedgerEntryNo, InvoiceAmount);
+
+        // [GIVEN] Bank + journal template/batch, and ONE unmatched recon line for the invoice amount whose
+        // Transaction Date (WorkDate - 10 days) is DISTINCT from both WorkDate and the header Statement
+        // Date (WorkDate - 3 days) — so passing the assertion can ONLY mean the Transaction Date drove it.
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        TransactionDate := CalcDate('<-10D>', WorkDate());
+        StatementDate := CalcDate('<-3D>', WorkDate());
+        Assert.AreNotEqual(WorkDate(), TransactionDate, 'Arrange: Transaction Date must differ from WorkDate to be discriminating.');
+
+        LibraryERM.CreateBankAccReconciliation(
+            BankAccReconciliation, BankAccount."No.",
+            BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+        BankAccReconciliation.Validate("Statement Date", StatementDate);
+        BankAccReconciliation.Modify(true);
+        LibraryERM.CreateBankAccReconciliationLn(BankAccReconLine, BankAccReconciliation);
+        BankAccReconLine.Validate("Statement Amount", InvoiceAmount);
+        BankAccReconLine.Validate("Transaction Date", TransactionDate);
+        BankAccReconLine.Difference := InvoiceAmount;
+        BankAccReconLine.Modify(true);
+        StatementNo := BankAccReconLine."Statement No.";
+        StatementLineNo := BankAccReconLine."Statement Line No.";
+
+        // [WHEN] The agent posts and reconciles.
+        Request := BuildRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer."No.", AppliedCustLedgerEntryNo, InvoiceAmount);
+        Response := PmtReconService.PostAndReconcile(Request);
+        ResultBankEntryNo := ReadInt(Response, 'bankAccountLedgerEntryNo');
+
+        // [THEN] The created Bank Account Ledger Entry posts on the Transaction Date, not WorkDate.
+        BankAccLedgerEntry.Get(ResultBankEntryNo);
+        Assert.AreEqual(
+            TransactionDate, BankAccLedgerEntry."Posting Date",
+            'The bank ledger entry must post on the recon line Transaction Date, not WorkDate.');
+
+        // [THEN] The customer payment leg shares that same posting date (one balanced document, one date).
+        CustLedgerEntry.SetRange("Customer No.", Customer."No.");
+        CustLedgerEntry.SetRange("Document Type", CustLedgerEntry."Document Type"::Payment);
+        CustLedgerEntry.FindFirst();
+        Assert.AreEqual(
+            TransactionDate, CustLedgerEntry."Posting Date",
+            'The customer payment leg must share the recon line Transaction Date.');
+    end;
+
+    [Test]
+    procedure PostAndReconcile_FallsBackToStatementDateWhenNoTransactionDate()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        BankAccReconciliation: Record "Bank Acc. Reconciliation";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Response: JsonObject;
+        AppliedCustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+        StatementDate: Date;
+        ResultBankEntryNo: Integer;
+    begin
+        // [SCENARIO] When the recon line carries NO Transaction Date (some bank feeds populate only the
+        // statement header), the payment must fall back to the header's Statement Date — never WorkDate.
+
+        // [GIVEN] A customer with a posted sales invoice and its open ledger entry.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), AppliedCustLedgerEntryNo, InvoiceAmount);
+
+        // [GIVEN] A recon line with a BLANK Transaction Date and a header Statement Date of WorkDate - 7 days.
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        StatementDate := CalcDate('<-7D>', WorkDate());
+        Assert.AreNotEqual(WorkDate(), StatementDate, 'Arrange: Statement Date must differ from WorkDate to be discriminating.');
+
+        LibraryERM.CreateBankAccReconciliation(
+            BankAccReconciliation, BankAccount."No.",
+            BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+        BankAccReconciliation.Validate("Statement Date", StatementDate);
+        BankAccReconciliation.Modify(true);
+        LibraryERM.CreateBankAccReconciliationLn(BankAccReconLine, BankAccReconciliation);
+        BankAccReconLine.Validate("Statement Amount", InvoiceAmount);
+        BankAccReconLine.Validate("Transaction Date", 0D);
+        BankAccReconLine.Difference := InvoiceAmount;
+        BankAccReconLine.Modify(true);
+        StatementNo := BankAccReconLine."Statement No.";
+        StatementLineNo := BankAccReconLine."Statement Line No.";
+
+        // [WHEN] The agent posts and reconciles.
+        Request := BuildRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer."No.", AppliedCustLedgerEntryNo, InvoiceAmount);
+        Response := PmtReconService.PostAndReconcile(Request);
+        ResultBankEntryNo := ReadInt(Response, 'bankAccountLedgerEntryNo');
+
+        // [THEN] The bank ledger entry posts on the header Statement Date (the fallback), not WorkDate.
+        BankAccLedgerEntry.Get(ResultBankEntryNo);
+        Assert.AreEqual(
+            StatementDate, BankAccLedgerEntry."Posting Date",
+            'With no Transaction Date, the bank ledger entry must post on the header Statement Date, not WorkDate.');
+    end;
+
+    [Test]
+    procedure PostAndReconcile_RequiresBatchNoSeries()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        SeriesLessBatch: Record "Gen. Journal Batch";
+        BankAccReconciliation: Record "Bank Acc. Reconciliation";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        AppliedCustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+    begin
+        // [SCENARIO] A payment posted through a journal batch that has NO No. Series must be rejected with a
+        // clear, actionable error — production payment documents must draw controlled, auditable numbers from
+        // a series, never a silently-minted synthetic number. (SeriesLessBatch is intentionally kept without a
+        // No. Series; the happy-path tests are the ones that gain a series.)
+
+        // [GIVEN] A customer with a posted sales invoice and its open ledger entry.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), AppliedCustLedgerEntryNo, InvoiceAmount);
+
+        // [GIVEN] Bank + template + a batch with NO No. Series, and one unmatched recon line.
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        LibraryERM.CreateGenJournalBatch(SeriesLessBatch, GenJournalTemplate.Name);
+        SeriesLessBatch.Validate("No. Series", '');
+        SeriesLessBatch.Modify(true);
+        LibraryERM.CreateBankAccReconciliation(
+            BankAccReconciliation, BankAccount."No.",
+            BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+        LibraryERM.CreateBankAccReconciliationLn(BankAccReconLine, BankAccReconciliation);
+        BankAccReconLine.Validate("Statement Amount", InvoiceAmount);
+        BankAccReconLine.Difference := InvoiceAmount;
+        BankAccReconLine.Modify(true);
+        StatementNo := BankAccReconLine."Statement No.";
+        StatementLineNo := BankAccReconLine."Statement Line No.";
+
+        // [WHEN/THEN] PostAndReconcile must reject the seriesless batch, naming the No. Series requirement.
+        Request := BuildRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, SeriesLessBatch.Name, NewExternalDocNo(),
+            Customer."No.", AppliedCustLedgerEntryNo, InvoiceAmount);
+        asserterror PmtReconService.PostAndReconcile(Request);
+        Assert.ExpectedError('No. Series');
+    end;
+
+    [Test]
     procedure PostAndReconcileJson_TextBoundary()
     var
         Customer: Record Customer;
