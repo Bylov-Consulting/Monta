@@ -296,11 +296,13 @@ codeunit 50202 "MON Pmt Recon Service"
         BankAccReconLine: Record "Bank Acc. Reconciliation Line";
         BankAccRecon: Record "Bank Acc. Reconciliation";
     begin
+        BankAccReconLine.SetLoadFields("Transaction Date");
         if BankAccReconLine.Get(
              BankAccReconLine."Statement Type"::"Bank Reconciliation", BankAccountNo, StatementNo, StatementLineNo)
         then
             if BankAccReconLine."Transaction Date" <> 0D then
                 exit(BankAccReconLine."Transaction Date");
+        BankAccRecon.SetLoadFields("Statement Date");
         if BankAccRecon.Get(
              BankAccRecon."Statement Type"::"Bank Reconciliation", BankAccountNo, StatementNo)
         then
