@@ -10,6 +10,7 @@ codeunit 50200 "MON Pmt Recon Post"
         ClosedEntryErr: Label 'Customer ledger entry %1 is closed and cannot be settled by this payment.', Comment = '%1 = Cust. Ledger Entry No.';
         CustomerMismatchErr: Label 'Customer ledger entry %1 does not belong to customer %2.', Comment = '%1 = Cust. Ledger Entry No., %2 = Customer No.';
         InvalidBankAmountErr: Label 'The total write-off amount (%1) must be less than the total applied amount (%2).', Comment = '%1 = write-off total, %2 = applied total';
+        MissingNoSeriesErr: Label 'General journal batch %1/%2 has no No. Series. Configure a No. Series on the batch so payment documents draw controlled, auditable numbers.', Comment = '%1 = Journal Template Name, %2 = Journal Batch Name';
 
     /// <summary>
     /// Posts an incoming customer payment that balances to a Bank Account — creating a Bank
@@ -77,9 +78,12 @@ codeunit 50200 "MON Pmt Recon Post"
             TempApplyBuffer.Insert();
         end;
 
+        // No statement context on this low-level overload -> post on WorkDate. The statement-aware
+        // date (transaction/statement date) is resolved and supplied by the service layer, which owns
+        // the reconciliation-line knowledge.
         exit(
             this.PostCustomerPaymentsToBank(
-                TempApplyBuffer, BankAccountNo, GenJnlTemplateName, GenJnlBatchName, ExternalDocumentNo));
+                TempApplyBuffer, BankAccountNo, WorkDate(), GenJnlTemplateName, GenJnlBatchName, ExternalDocumentNo));
     end;
 
     /// <summary>
@@ -102,12 +106,13 @@ codeunit 50200 "MON Pmt Recon Post"
     /// </summary>
     /// <param name="TempApplyBuffer">Temporary buffer with one row per (Customer No., Cust. Ledger Entry No., Amount to Apply). Each amount must be > 0 and each entry must be open and belong to its row's customer.</param>
     /// <param name="BankAccountNo">The bank account the payment is received into; the single bank line is posted here.</param>
+    /// <param name="PostingDate">The date all document lines post on (and the No. Series draws against). Callers with statement context supply the reconciliation line's transaction/statement date so the bank entry lands in the statement's period.</param>
     /// <param name="GenJnlTemplateName">General journal template used to post the payment.</param>
     /// <param name="GenJnlBatchName">General journal batch (within the template) used to post the payment.</param>
     /// <param name="ExternalDocumentNo">Optional external document reference stamped on the payment lines.</param>
     /// <returns>The Entry No. of the single Bank Account Ledger Entry created by the posting (left open for reconciliation).</returns>
     [CommitBehavior(CommitBehavior::Ignore)]
-    internal procedure PostCustomerPaymentsToBank(var TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary; BankAccountNo: Code[20]; GenJnlTemplateName: Code[10]; GenJnlBatchName: Code[10]; ExternalDocumentNo: Code[35]): Integer
+    internal procedure PostCustomerPaymentsToBank(var TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary; BankAccountNo: Code[20]; PostingDate: Date; GenJnlTemplateName: Code[10]; GenJnlBatchName: Code[10]; ExternalDocumentNo: Code[35]): Integer
     var
         GenJournalTemplate: Record "Gen. Journal Template";
         GenJournalBatch: Record "Gen. Journal Batch";
@@ -135,7 +140,7 @@ codeunit 50200 "MON Pmt Recon Post"
         // One Document No. for the whole balanced payment document. The bank (cash) line is the customer
         // applies LESS the write-offs: write-offs settle invoice value against a G/L account, never the
         // bank, so the bank receipt equals the cash actually received.
-        DocumentNo := this.DetermineDocumentNo(GenJournalBatch, this.FirstCustLedgerEntryNo(TempApplyBuffer));
+        DocumentNo := this.DetermineDocumentNo(GenJournalBatch, PostingDate);
         AppliesTotal := this.SumBuffer(TempApplyBuffer, TempApplyBuffer."Line Type"::"Customer Apply");
         WriteOffTotal := this.SumBuffer(TempApplyBuffer, TempApplyBuffer."Line Type"::"Write-Off");
         BankAmount := AppliesTotal - WriteOffTotal;
@@ -184,7 +189,7 @@ codeunit 50200 "MON Pmt Recon Post"
             GenJournalLine.Validate("Journal Template Name", GenJournalTemplate.Name);
             GenJournalLine.Validate("Journal Batch Name", GenJournalBatch.Name);
             GenJournalLine."Line No." := LineNo;
-            GenJournalLine.Validate("Posting Date", WorkDate());
+            GenJournalLine.Validate("Posting Date", PostingDate);
             GenJournalLine.Validate("Document Type", GenJournalLine."Document Type"::Payment);
             GenJournalLine.Validate("Document No.", DocumentNo);
             GenJournalLine.Validate("Account Type", GenJournalLine."Account Type"::Customer);
@@ -213,7 +218,7 @@ codeunit 50200 "MON Pmt Recon Post"
                 GenJournalLine.Validate("Journal Template Name", GenJournalTemplate.Name);
                 GenJournalLine.Validate("Journal Batch Name", GenJournalBatch.Name);
                 GenJournalLine."Line No." := LineNo;
-                GenJournalLine.Validate("Posting Date", WorkDate());
+                GenJournalLine.Validate("Posting Date", PostingDate);
                 GenJournalLine.Validate("Document Type", GenJournalLine."Document Type"::Payment);
                 GenJournalLine.Validate("Document No.", DocumentNo);
                 GenJournalLine.Validate("Account Type", GenJournalLine."Account Type"::"G/L Account");
@@ -233,7 +238,7 @@ codeunit 50200 "MON Pmt Recon Post"
         GenJournalLine.Validate("Journal Template Name", GenJournalTemplate.Name);
         GenJournalLine.Validate("Journal Batch Name", GenJournalBatch.Name);
         GenJournalLine."Line No." := LineNo;
-        GenJournalLine.Validate("Posting Date", WorkDate());
+        GenJournalLine.Validate("Posting Date", PostingDate);
         GenJournalLine.Validate("Document Type", GenJournalLine."Document Type"::Payment);
         GenJournalLine.Validate("Document No.", DocumentNo);
         GenJournalLine.Validate("Account Type", GenJournalLine."Account Type"::"Bank Account");
@@ -287,15 +292,17 @@ codeunit 50200 "MON Pmt Recon Post"
         CustEntryEdit.Run(CustLedgerEntry);
     end;
 
-    local procedure DetermineDocumentNo(GenJournalBatch: Record "Gen. Journal Batch"; SeedCustLedgerEntryNo: Integer) DocumentNo: Code[20]
+    local procedure DetermineDocumentNo(GenJournalBatch: Record "Gen. Journal Batch"; PostingDate: Date): Code[20]
     var
         NoSeries: Codeunit "No. Series";
     begin
-        // Respect the batch's No. Series when one is configured; otherwise assign a deterministic
-        // document number derived from a representative applied ledger entry.
-        if GenJournalBatch."No. Series" <> '' then
-            exit(NoSeries.GetNextNo(GenJournalBatch."No. Series", WorkDate()));
-        exit(CopyStr('MONPMT' + Format(SeedCustLedgerEntryNo), 1, MaxStrLen(DocumentNo)));
+        // Production payment documents must draw controlled, auditable numbers from the batch's No.
+        // Series. A batch with no series is a configuration error — reject it rather than silently
+        // minting a synthetic number. The number is drawn against the payment's posting date so the
+        // document number and the posting land in the same period.
+        if GenJournalBatch."No. Series" = '' then
+            Error(MissingNoSeriesErr, GenJournalBatch."Journal Template Name", GenJournalBatch.Name);
+        exit(NoSeries.GetNextNo(GenJournalBatch."No. Series", PostingDate));
     end;
 
     local procedure MakeAppliesToID(DocumentNo: Code[20]; CustomerSeq: Integer): Code[50]
@@ -303,17 +310,6 @@ codeunit 50200 "MON Pmt Recon Post"
         // Distinct per-customer Applies-to ID derived from the shared Document No. plus the customer's
         // 1-based sequence in the document. Bounded to Code[50] (DocumentNo is Code[20] + '-' + digits).
         exit(CopyStr(DocumentNo + '-' + Format(CustomerSeq), 1, 50));
-    end;
-
-    local procedure FirstCustLedgerEntryNo(var TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary): Integer
-    begin
-        // Seed the document number from a real applied ledger entry (Customer Apply rows only — a
-        // write-off row carries no Cust. Ledger Entry No.).
-        TempApplyBuffer.Reset();
-        TempApplyBuffer.SetRange("Line Type", TempApplyBuffer."Line Type"::"Customer Apply");
-        TempApplyBuffer.FindFirst();
-        TempApplyBuffer.SetRange("Line Type");
-        exit(TempApplyBuffer."Cust. Ledger Entry No.");
     end;
 
     local procedure SumBuffer(var TempApplyBuffer: Record "MON Pmt Recon Apply Buf" temporary; LineType: Option "Customer Apply","Write-Off") Total: Decimal

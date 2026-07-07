@@ -113,6 +113,7 @@ codeunit 50202 "MON Pmt Recon Service"
         StatementLineNo: Integer;
         BufLineNo: Integer;
         BankAccountLedgerEntryNo: Integer;
+        PostingDate: Date;
     begin
         // --- Validate the request schema up front (BEFORE the idempotency gate and any posting) so the
         // agent caller gets a clear, actionable error instead of an opaque downstream failure. ---
@@ -184,11 +185,17 @@ codeunit 50202 "MON Pmt Recon Service"
                 end;
         end;
 
+        // --- Resolve the posting date from the reconciliation line so the payment posts on the date the
+        // cash moved at the bank (never today's WorkDate); the bank ledger entry then lands in the same
+        // period as the statement it reconciles. See ResolvePostingDate for the transaction-date ->
+        // statement-date -> WorkDate fallback chain. ---
+        PostingDate := this.ResolvePostingDate(BankAccountNo, StatementNo, StatementLineNo);
+
         // --- Compose post + match in ONE transaction (NO intermediate Commit -> atomic) ---
         // ONE balanced posting for the grand TOTAL -> ONE open Bank Account Ledger Entry, matched 1:1.
         BankAccountLedgerEntryNo :=
             PmtReconPost.PostCustomerPaymentsToBank(
-                TempApplyBuffer, BankAccountNo,
+                TempApplyBuffer, BankAccountNo, PostingDate,
                 JournalTemplateName, JournalBatchName, ExternalDocumentNo);
 
         PmtReconMatch.MatchBankEntryToReconLine(
@@ -275,6 +282,31 @@ codeunit 50202 "MON Pmt Recon Service"
                 SeenEntryNos.Add(CustLedgerEntryNo);
             end;
         end;
+    end;
+
+    /// <summary>
+    /// Resolves the date the payment must post on, from the reconciliation line being matched:
+    /// the line's Transaction Date (the date the cash actually moved at the bank), falling back to the
+    /// statement header's Statement Date when the line carries none, and to WorkDate only as an absolute
+    /// last resort (both dates blank — pathological on a real reconciliation). This keeps the posted bank
+    /// ledger entry in the same period as the statement it reconciles, rather than on today's WorkDate.
+    /// </summary>
+    local procedure ResolvePostingDate(BankAccountNo: Code[20]; StatementNo: Code[20]; StatementLineNo: Integer): Date
+    var
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        BankAccRecon: Record "Bank Acc. Reconciliation";
+    begin
+        if BankAccReconLine.Get(
+             BankAccReconLine."Statement Type"::"Bank Reconciliation", BankAccountNo, StatementNo, StatementLineNo)
+        then
+            if BankAccReconLine."Transaction Date" <> 0D then
+                exit(BankAccReconLine."Transaction Date");
+        if BankAccRecon.Get(
+             BankAccRecon."Statement Type"::"Bank Reconciliation", BankAccountNo, StatementNo)
+        then
+            if BankAccRecon."Statement Date" <> 0D then
+                exit(BankAccRecon."Statement Date");
+        exit(WorkDate());
     end;
 
     /// <summary>Rejects an absent or blank required header field with the field-naming RequiredFieldErr.</summary>

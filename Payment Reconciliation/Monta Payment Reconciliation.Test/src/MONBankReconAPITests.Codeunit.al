@@ -144,6 +144,14 @@ codeunit 50303 "MON Bank Recon API Tests"
     /// ledger Entry No. and outputs the signed receipt amount (the value to use as the matched
     /// reconciliation line's Statement Amount).
     /// </summary>
+    local procedure CreateGenJnlBatchWithSeries(var GenJournalBatch: Record "Gen. Journal Batch"; TemplateName: Code[10])
+    begin
+        // The poster now rejects a batch with no No. Series, so posting tests must configure one.
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, TemplateName);
+        GenJournalBatch.Validate("No. Series", LibraryERM.CreateNoSeriesCode());
+        GenJournalBatch.Modify(true);
+    end;
+
     local procedure CreateOpenBankReceiptOn(var BankAccount: Record "Bank Account"; var StatementAmount: Decimal): Integer
     var
         Customer: Record Customer;
@@ -172,7 +180,7 @@ codeunit 50303 "MON Bank Recon API Tests"
         CustLedgerEntry.CalcFields("Remaining Amount");
 
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
         BankEntryNo := PmtReconPost.PostCustomerPaymentToBank(
             Customer."No.", BankAccount."No.", CustLedgerEntry."Remaining Amount", CustLedgerEntry."Entry No.",
             GenJournalTemplate.Name, GenJournalBatch.Name,

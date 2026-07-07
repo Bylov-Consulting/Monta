@@ -63,7 +63,7 @@ codeunit 50301 "MON Pmt Recon Match Tests"
         // exactly ONE open Bank Account Ledger Entry for the invoice amount.
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
         BankEntryNo := PmtReconPost.PostCustomerPaymentToBank(
             Customer."No.", BankAccount."No.", InvoiceAmount, AppliedCustLedgerEntryNo,
             GenJournalTemplate.Name, GenJournalBatch.Name,
@@ -308,6 +308,14 @@ codeunit 50301 "MON Pmt Recon Match Tests"
     /// happy-path arrange. Returns the new bank ledger Entry No. and outputs the signed receipt amount
     /// (the value to use as the reconciliation line's Statement Amount).
     /// </summary>
+    local procedure CreateGenJnlBatchWithSeries(var GenJournalBatch: Record "Gen. Journal Batch"; TemplateName: Code[10])
+    begin
+        // The poster now rejects a batch with no No. Series, so posting tests must configure one.
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, TemplateName);
+        GenJournalBatch.Validate("No. Series", LibraryERM.CreateNoSeriesCode());
+        GenJournalBatch.Modify(true);
+    end;
+
     local procedure CreateOpenBankReceiptOn(var BankAccount: Record "Bank Account"; var StatementAmount: Decimal): Integer
     var
         Customer: Record Customer;
@@ -336,7 +344,7 @@ codeunit 50301 "MON Pmt Recon Match Tests"
         CustLedgerEntry.CalcFields("Remaining Amount");
 
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
         BankEntryNo := PmtReconPost.PostCustomerPaymentToBank(
             Customer."No.", BankAccount."No.", CustLedgerEntry."Remaining Amount", CustLedgerEntry."Entry No.",
             GenJournalTemplate.Name, GenJournalBatch.Name,

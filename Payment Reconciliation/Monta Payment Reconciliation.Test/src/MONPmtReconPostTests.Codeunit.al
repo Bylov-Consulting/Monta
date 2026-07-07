@@ -53,7 +53,7 @@ codeunit 50300 "MON Pmt Recon Post Tests"
         // [GIVEN] A bank account and a general journal template + batch for the payment
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
 
         ExternalDocNo := CopyStr('MON-' + Format(LibraryRandom.RandIntInRange(100000, 999999)), 1, MaxStrLen(ExternalDocNo));
 
@@ -180,7 +180,16 @@ codeunit 50300 "MON Pmt Recon Post Tests"
     begin
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
+    end;
+
+    local procedure CreateGenJnlBatchWithSeries(var GenJournalBatch: Record "Gen. Journal Batch"; TemplateName: Code[10])
+    begin
+        // Production requires the batch to draw document numbers from a No. Series; the poster now
+        // rejects a seriesless batch, so every posting test must configure one.
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, TemplateName);
+        GenJournalBatch.Validate("No. Series", LibraryERM.CreateNoSeriesCode());
+        GenJournalBatch.Modify(true);
     end;
 
     local procedure NewExternalDocNo(): Code[35]

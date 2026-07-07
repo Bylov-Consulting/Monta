@@ -62,7 +62,7 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         // [GIVEN] A bank account and a general journal template + batch for the payment.
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
 
         // [GIVEN] A standard Bank Acc. Reconciliation (Statement Type = Bank Reconciliation) for that
         // bank account with ONE UNMATCHED line whose Statement Amount equals the invoice amount. A
@@ -183,7 +183,7 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         // Date (WorkDate - 3 days) — so passing the assertion can ONLY mean the Transaction Date drove it.
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
         TransactionDate := CalcDate('<-10D>', WorkDate());
         StatementDate := CalcDate('<-3D>', WorkDate());
         Assert.AreNotEqual(WorkDate(), TransactionDate, 'Arrange: Transaction Date must differ from WorkDate to be discriminating.');
@@ -255,7 +255,7 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         // [GIVEN] A recon line with a BLANK Transaction Date and a header Statement Date of WorkDate - 7 days.
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
         StatementDate := CalcDate('<-7D>', WorkDate());
         Assert.AreNotEqual(WorkDate(), StatementDate, 'Arrange: Statement Date must differ from WorkDate to be discriminating.');
 
@@ -395,7 +395,7 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         // Statement Amount equals the invoice amount.
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
 
         StatementAmount := InvoiceAmount;
         LibraryERM.CreateBankAccReconciliation(
@@ -522,7 +522,7 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         // [GIVEN] A bank account and a general journal template + batch for the payment.
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
 
         // [GIVEN] A standard Bank Acc. Reconciliation with ONE UNMATCHED line whose Statement Amount is
         // the TOTAL of both invoices (A + B): a single receipt for the whole payment. Difference = A+B,
@@ -674,7 +674,7 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         // [GIVEN] A bank account and a general journal template + batch for the payment.
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
 
         // [GIVEN] A standard Bank Acc. Reconciliation with ONE UNMATCHED line whose Statement Amount is
         // the TOTAL across both customers (A + B): a single receipt for the whole payment. Difference =
@@ -812,7 +812,7 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         // [GIVEN] A bank account and a general journal template + batch for the payment.
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
 
         // [GIVEN] A G/L account the agent nominates for the write-off, explicitly set to allow DIRECT
         // POSTING (a balancing G/L journal line cannot post to an account with Direct Posting = false).
@@ -968,7 +968,7 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         // Bank Account Ledger Entry isolates exactly the entries this test posts (so "exactly one" is sound).
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
 
         // [GIVEN] A standard Bank Acc. Reconciliation with ONE UNMATCHED line whose Statement Amount = X.
         StatementAmount := InvoiceAmount;
@@ -1096,7 +1096,7 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         // [GIVEN] A fresh bank account + journal (fresh bank -> a simple Count isolates this test).
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
 
         // [GIVEN] ONE reconciliation line L; Statement Amount = X1 so the FIRST request reconciles cleanly.
         LibraryERM.CreateBankAccReconciliation(
@@ -1185,7 +1185,7 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         // Bank Account Ledger Entry isolates exactly the entries this test posts (so "exactly one" is sound).
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
 
         // [GIVEN] A standard Bank Acc. Reconciliation with ONE UNMATCHED line whose Statement Amount = X.
         StatementAmount := InvoiceAmount;
@@ -1613,7 +1613,7 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
     begin
         LibraryERM.CreateBankAccount(BankAccount);
         LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
-        LibraryERM.CreateGenJournalBatch(GenJournalBatch, GenJournalTemplate.Name);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
         LibraryERM.CreateBankAccReconciliation(
             BankAccReconciliation, BankAccount."No.",
             BankAccReconciliation."Statement Type"::"Bank Reconciliation");
@@ -1762,6 +1762,18 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         Request.Add('externalDocumentNo', ExternalDocumentNo);
         Request.Add('payments', Payments);
         exit(Request);
+    end;
+
+    /// <summary>
+    /// Creates a gen. journal batch that draws its document numbers from a No. Series — the production
+    /// requirement the poster now enforces (a seriesless batch is rejected). All happy-path posting
+    /// tests use this; only PostAndReconcile_RequiresBatchNoSeries deliberately keeps a seriesless batch.
+    /// </summary>
+    local procedure CreateGenJnlBatchWithSeries(var GenJournalBatch: Record "Gen. Journal Batch"; TemplateName: Code[10])
+    begin
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, TemplateName);
+        GenJournalBatch.Validate("No. Series", LibraryERM.CreateNoSeriesCode());
+        GenJournalBatch.Modify(true);
     end;
 
     /// <summary>
