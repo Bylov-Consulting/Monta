@@ -1,0 +1,199 @@
+codeunit 50300 "MON Pmt Recon Post Tests"
+{
+    Subtype = Test;
+    TestPermissions = Disabled;
+
+    var
+        LibrarySales: Codeunit "Library - Sales";
+        LibraryERM: Codeunit "Library - ERM";
+        LibraryInventory: Codeunit "Library - Inventory";
+        LibraryRandom: Codeunit "Library - Random";
+        Assert: Codeunit "Library Assert";
+
+    [Test]
+    procedure PostsPaymentToBankAndClosesInvoice()
+    var
+        Customer: Record Customer;
+        Item: Record Item;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        SalesHeader: Record "Sales Header";
+        SalesLine: Record "Sales Line";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
+        PmtReconPost: Codeunit "MON Pmt Recon Post";
+        PostedInvoiceNo: Code[20];
+        AppliedCustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        ExternalDocNo: Code[35];
+        ResultEntryNo: Integer;
+    begin
+        // [SCENARIO] An incoming customer payment that balances to a Bank Account, applied to an
+        // open posted sales invoice, must create a Bank Account Ledger Entry (left open so it can
+        // later be reconciled) and fully close the applied invoice.
+
+        // [GIVEN] A customer with a posted sales invoice for a known amount
+        LibrarySales.CreateCustomer(Customer);
+        LibraryInventory.CreateItem(Item);
+        LibrarySales.CreateSalesHeader(SalesHeader, SalesHeader."Document Type"::Invoice, Customer."No.");
+        LibrarySales.CreateSalesLine(SalesLine, SalesHeader, SalesLine.Type::Item, Item."No.", 1);
+        SalesLine.Validate("Unit Price", LibraryRandom.RandDecInRange(100, 1000, 2));
+        SalesLine.Modify(true);
+        PostedInvoiceNo := LibrarySales.PostSalesDocument(SalesHeader, true, true);
+
+        // [GIVEN] The open customer ledger entry and its remaining amount
+        CustLedgerEntry.SetRange("Document Type", CustLedgerEntry."Document Type"::Invoice);
+        CustLedgerEntry.SetRange("Document No.", PostedInvoiceNo);
+        CustLedgerEntry.FindFirst();
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        AppliedCustLedgerEntryNo := CustLedgerEntry."Entry No.";
+        InvoiceAmount := CustLedgerEntry."Remaining Amount";
+
+        // [GIVEN] A bank account and a general journal template + batch for the payment
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
+
+        ExternalDocNo := CopyStr('MON-' + Format(LibraryRandom.RandIntInRange(100000, 999999)), 1, MaxStrLen(ExternalDocNo));
+
+        // [WHEN] The agent posts the payment to the bank, applied to the open invoice
+        ResultEntryNo := PmtReconPost.PostCustomerPaymentToBank(
+            Customer."No.", BankAccount."No.", InvoiceAmount, AppliedCustLedgerEntryNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, ExternalDocNo);
+
+        // [THEN] A Bank Account Ledger Entry was created (standard customerPayments API cannot do this)
+        Assert.AreNotEqual(0, ResultEntryNo, 'Posting must return a non-zero Bank Account Ledger Entry No.');
+        Assert.IsTrue(
+            BankAccLedgerEntry.Get(ResultEntryNo),
+            'A Bank Account Ledger Entry with the returned No. must exist.');
+
+        // [THEN] It belongs to the payment bank account, with |Amount| = the payment, and is left open
+        Assert.AreEqual(
+            BankAccount."No.", BankAccLedgerEntry."Bank Account No.",
+            'The Bank Account Ledger Entry must belong to the payment bank account.');
+        Assert.AreEqual(
+            InvoiceAmount, Abs(BankAccLedgerEntry.Amount),
+            'The Bank Account Ledger Entry amount must equal the posted payment amount.');
+        Assert.IsTrue(
+            BankAccLedgerEntry.Open,
+            'The Bank Account Ledger Entry must remain open so it can later be reconciled.');
+
+        // [THEN] The applied invoice is now fully closed (payment really was applied, not just posted)
+        CustLedgerEntry.Get(AppliedCustLedgerEntryNo);
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        Assert.AreEqual(
+            0, CustLedgerEntry."Remaining Amount",
+            'The applied invoice must be fully paid (Remaining Amount = 0).');
+        Assert.IsFalse(
+            CustLedgerEntry.Open,
+            'The applied invoice must be closed (Open = false) after the payment is applied.');
+    end;
+
+    [Test]
+    procedure PostToClosedInvoice_IsRejected()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        PmtReconPost: Codeunit "MON Pmt Recon Post";
+        CustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+    begin
+        // [SCENARIO] A payment applied to a customer ledger entry that is already closed (fully
+        // settled by an earlier payment) must be rejected — the posting must not settle the same
+        // invoice twice.
+
+        // [GIVEN] A customer with a posted invoice, settled in full by a first payment (this closes
+        // the invoice's customer ledger entry).
+        CreateCustomerWithPostedInvoice(Customer, CustLedgerEntryNo, InvoiceAmount);
+        CreatePaymentInfrastructure(BankAccount, GenJournalTemplate, GenJournalBatch);
+        PmtReconPost.PostCustomerPaymentToBank(
+            Customer."No.", BankAccount."No.", InvoiceAmount, CustLedgerEntryNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+
+        // [WHEN] A second payment is posted against that now-closed entry
+        asserterror PmtReconPost.PostCustomerPaymentToBank(
+            Customer."No.", BankAccount."No.", InvoiceAmount, CustLedgerEntryNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+
+        // [THEN] It is rejected with the closed-entry guard message
+        Assert.ExpectedError('is closed and cannot be settled by this payment');
+    end;
+
+    [Test]
+    procedure PostCrossCustomerEntry_IsRejected()
+    var
+        CustomerA: Record Customer;
+        CustomerB: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        PmtReconPost: Codeunit "MON Pmt Recon Post";
+        CustomerBEntryNo: Integer;
+        InvoiceAmountB: Decimal;
+    begin
+        // [SCENARIO] A payment for customer A that is applied to customer B's open ledger entry must
+        // be rejected — an entry may only be settled by a payment from its own customer.
+
+        // [GIVEN] Customer A (the payer) and Customer B with an open posted invoice
+        LibrarySales.CreateCustomer(CustomerA);
+        CreateCustomerWithPostedInvoice(CustomerB, CustomerBEntryNo, InvoiceAmountB);
+        CreatePaymentInfrastructure(BankAccount, GenJournalTemplate, GenJournalBatch);
+
+        // [WHEN] Customer A pays, but the payment is applied to Customer B's open entry
+        asserterror PmtReconPost.PostCustomerPaymentToBank(
+            CustomerA."No.", BankAccount."No.", InvoiceAmountB, CustomerBEntryNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+
+        // [THEN] It is rejected with the cross-customer guard message
+        Assert.ExpectedError('does not belong to customer');
+    end;
+
+    local procedure CreateCustomerWithPostedInvoice(var Customer: Record Customer; var CustLedgerEntryNo: Integer; var InvoiceAmount: Decimal)
+    var
+        Item: Record Item;
+        SalesHeader: Record "Sales Header";
+        SalesLine: Record "Sales Line";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        PostedInvoiceNo: Code[20];
+    begin
+        // Mirrors the happy-path arrange: a customer with one open posted sales invoice.
+        LibrarySales.CreateCustomer(Customer);
+        LibraryInventory.CreateItem(Item);
+        LibrarySales.CreateSalesHeader(SalesHeader, SalesHeader."Document Type"::Invoice, Customer."No.");
+        LibrarySales.CreateSalesLine(SalesLine, SalesHeader, SalesLine.Type::Item, Item."No.", 1);
+        SalesLine.Validate("Unit Price", LibraryRandom.RandDecInRange(100, 1000, 2));
+        SalesLine.Modify(true);
+        PostedInvoiceNo := LibrarySales.PostSalesDocument(SalesHeader, true, true);
+
+        CustLedgerEntry.SetRange("Document Type", CustLedgerEntry."Document Type"::Invoice);
+        CustLedgerEntry.SetRange("Document No.", PostedInvoiceNo);
+        CustLedgerEntry.FindFirst();
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        CustLedgerEntryNo := CustLedgerEntry."Entry No.";
+        InvoiceAmount := CustLedgerEntry."Remaining Amount";
+    end;
+
+    local procedure CreatePaymentInfrastructure(var BankAccount: Record "Bank Account"; var GenJournalTemplate: Record "Gen. Journal Template"; var GenJournalBatch: Record "Gen. Journal Batch")
+    begin
+        LibraryERM.CreateBankAccount(BankAccount);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
+    end;
+
+    local procedure CreateGenJnlBatchWithSeries(var GenJournalBatch: Record "Gen. Journal Batch"; TemplateName: Code[10])
+    begin
+        // Production requires the batch to draw document numbers from a No. Series; the poster now
+        // rejects a seriesless batch, so every posting test must configure one.
+        LibraryERM.CreateGenJournalBatch(GenJournalBatch, TemplateName);
+        GenJournalBatch.Validate("No. Series", LibraryERM.CreateNoSeriesCode());
+        GenJournalBatch.Modify(true);
+    end;
+
+    local procedure NewExternalDocNo(): Code[35]
+    begin
+        exit(CopyStr('MON-' + Format(LibraryRandom.RandIntInRange(100000, 999999)), 1, 35));
+    end;
+}
