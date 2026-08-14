@@ -1,7 +1,12 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/AL-Go-Actions/v9.0/.Modules/settings.schema.json",
   "country": "w1",
-  "appFolders": [ "Monta Payment Reconciliation" ],
-  "testFolders": [ "Monta Payment Reconciliation.Test" ],
-  "bcptTestFolders": []
+  "appFolders": [
+    "Monta Payment Reconciliation"
+  ],
+  "testFolders": [
+    "Monta Payment Reconciliation.Test"
+  ],
+  "bcptTestFolders": [],
+  "repoVersion": "1.1"
 }

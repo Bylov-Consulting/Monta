@@ -2,7 +2,7 @@
   "id": "2876b48f-4f0d-4b1f-806a-44ea446ab9b5",
   "name": "Monta Payment Reconciliation",
   "publisher": "Bylov Consulting",
-  "version": "1.0.0.0",
+  "version": "1.1.0.0",
   "applicationInsightsConnectionString": "InstrumentationKey=b3829eec-6a47-4995-b039-587f849b739f;IngestionEndpoint=https://northeurope-2.in.applicationinsights.azure.com/;LiveEndpoint=https://northeurope.livediagnostics.monitor.azure.com/;ApplicationId=e64e6c70-f2d0-40b1-bdcd-1acf248ddde9",
   "brief": "Custom API surface for an external agent to register and post incoming customer payments, feeding Continia bank reconciliation.",
   "description": "Monta Payment Reconciliation exposes a focused set of custom APIs that let an external AI agent register and post incoming customer payments in Business Central, feeding Continia Statement Intelligence's bank-statement reconciliation. Targets Business Central 2026 wave 1 (v28).",
