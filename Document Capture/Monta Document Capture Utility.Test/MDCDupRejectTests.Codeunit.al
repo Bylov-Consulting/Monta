@@ -23,7 +23,7 @@ codeunit 50400 "MDC Dup. Reject Tests"
         ReasonNotRecordedErr: Label 'MDC Auto-Reject Reason does not hold the Continia comment text that caused the rejection.';
         RejectedAfterReopenErr: Label 'A document already marked MDC Auto-Rejected was rejected again after a user reopened it. The user can never win.';
         RejectedRegisteredDocErr: Label 'A Registered document was rejected. It has already become a purchase invoice, so the two records would contradict each other.';
-
+        RejectedOnBlankIDErr: Label 'A document was rejected while Duplicate Message Center ID is blank. Nothing identifies a duplicate, so nothing may be rejected.';
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
     var
@@ -260,6 +260,38 @@ codeunit 50400 "MDC Dup. Reject Tests"
         // [THEN] The stored document is still Registered
         RereadDocument.Get(Document."No.");
         Assert.AreEqual(RereadDocument.Status::Registered, RereadDocument.Status, RejectedRegisteredDocErr);
+    end;
+
+    [Test]
+    procedure DoesNothingWhenMsgCenterIDBlank()
+    var
+        Document: Record "CDC Document";
+        RereadDocument: Record "CDC Document";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+    begin
+        // [SCENARIO] MON-113: a company turns the switch on but never picks a Message Center
+        // ID. Nothing identifies a duplicate, so nothing may be rejected.
+        // The comment below deliberately carries a blank Message Center ID too. Without the
+        // blank-ID guard the code runs SetRange("Message Center ID", ''), which MATCHES that
+        // comment - so every document carrying a Warning gets auto-rejected. That is the real
+        // failure this test exists to prevent, not a theoretical one.
+        Initialize();
+
+        // [GIVEN] Auto-reject enabled but no Message Center ID chosen
+        SetupAutoReject(true, '');
+
+        // [GIVEN] An Open Document Capture document
+        CreateOpenDocument(Document);
+
+        // [GIVEN] A Validation Warning comment that also carries no Message Center ID
+        AddComment(Document."No.", '', OtherWarningCommentTxt);
+
+        // [WHEN] The duplicate check runs
+        DupRejectMgt.RejectIfDuplicate(Document);
+
+        // [THEN] The stored document is still Open
+        RereadDocument.Get(Document."No.");
+        Assert.AreEqual(RereadDocument.Status::Open, RereadDocument.Status, RejectedOnBlankIDErr);
     end;
 
     local procedure Initialize()
