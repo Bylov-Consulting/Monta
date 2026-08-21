@@ -22,6 +22,7 @@ codeunit 50200 "MDC Dup. Reject Tests"
         NotFlaggedAutoRejectedErr: Label 'MDC Auto-Rejected was not set. An automatic rejection must be distinguishable from a human one.';
         ReasonNotRecordedErr: Label 'MDC Auto-Reject Reason does not hold the Continia comment text that caused the rejection.';
         RejectedAfterReopenErr: Label 'A document already marked MDC Auto-Rejected was rejected again after a user reopened it. The user can never win.';
+        RejectedRegisteredDocErr: Label 'A Registered document was rejected. It has already become a purchase invoice, so the two records would contradict each other.';
 
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
@@ -227,6 +228,40 @@ codeunit 50200 "MDC Dup. Reject Tests"
         Assert.AreEqual(RereadDocument.Status::Open, RereadDocument.Status, RejectedAfterReopenErr);
     end;
 
+    [Test]
+    procedure DoesNotRejectARegisteredDocument()
+    var
+        Document: Record "CDC Document";
+        RereadDocument: Record "CDC Document";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        MsgCenterID: Code[50];
+    begin
+        // [SCENARIO] MON-113: a Registered document has already become a purchase invoice in
+        // BC. Rejecting it after the fact would leave the Document Capture document saying
+        // Rejected while the invoice it created still exists - the two records would
+        // contradict each other, and nobody is watching a document that already registered,
+        // so the rejection would be silent.
+        // Everything here matches AutoRejectsWhenDuplicateCommentPresent except the status.
+        Initialize();
+
+        // [GIVEN] Auto-reject enabled for a specific Message Center ID
+        MsgCenterID := AnyMsgCenterID();
+        SetupAutoReject(true, MsgCenterID);
+
+        // [GIVEN] A document that has already registered, never auto-rejected
+        CreateRegisteredDocument(Document);
+
+        // [GIVEN] A Validation Warning comment carrying that Message Center ID
+        AddComment(Document."No.", MsgCenterID, DuplicateCommentTxt);
+
+        // [WHEN] The duplicate check runs
+        DupRejectMgt.RejectIfDuplicate(Document);
+
+        // [THEN] The stored document is still Registered
+        RereadDocument.Get(Document."No.");
+        Assert.AreEqual(RereadDocument.Status::Registered, RereadDocument.Status, RejectedRegisteredDocErr);
+    end;
+
     local procedure Initialize()
     begin
         AnyLib.SetDefaultSeed();
@@ -267,6 +302,19 @@ codeunit 50200 "MDC Dup. Reject Tests"
         Document."No." := AnyDocumentNo();
         Document."Document Category Code" := EnsureDocumentCategory();
         Document.Status := Document.Status::Open;
+        Document.Insert(false);
+    end;
+
+    // A document that has already registered - it has become a purchase invoice in BC.
+    // MDC Auto-Rejected is left false so the reopen guard cannot be what protects it.
+    // Status is set before Insert so the record the caller passes on carries it in memory,
+    // which is what RejectIfDuplicate reads.
+    local procedure CreateRegisteredDocument(var Document: Record "CDC Document")
+    begin
+        Document.Init();
+        Document."No." := AnyDocumentNo();
+        Document."Document Category Code" := EnsureDocumentCategory();
+        Document.Status := Document.Status::Registered;
         Document.Insert(false);
     end;
 
