@@ -1,0 +1,63 @@
+{
+  "id": "4bdd7546-226e-4325-8d19-1b5d9fcb4fc5",
+  "name": "Monta Document Capture Utility.Test",
+  "publisher": "Bylov Consulting",
+  "version": "1.2.0.0",
+  "brief": "",
+  "description": "Test app for Monta Document Capture Utility.",
+  "privacyStatement": "",
+  "EULA": "",
+  "help": "",
+  "url": "",
+  "logo": "",
+  "dependencies": [
+    {
+      "id": "2ce68cba-96aa-4f2b-80bd-502b16187a0f",
+      "name": "Monta Document Capture Utility",
+      "publisher": "Bylov Consulting",
+      "version": "1.2.0.0"
+    },
+    {
+      "id": "6da8dd2f-e698-461f-9147-8e404244dd85",
+      "name": "Continia Document Capture",
+      "publisher": "Continia Software",
+      "version": "27.3.0.0"
+    },
+    {
+      "id": "23de40a6-dfe8-4f80-80db-d70f83ce8caf",
+      "name": "Test Runner",
+      "publisher": "Microsoft",
+      "version": "27.0.0.0"
+    },
+    {
+      "id": "dd0be2ea-f733-4d65-bb34-a28f4624fb14",
+      "name": "Library Assert",
+      "publisher": "Microsoft",
+      "version": "27.0.0.0"
+    },
+    {
+      "id": "e7320ebb-08b3-4406-b1ec-b4927d3e280b",
+      "name": "Any",
+      "publisher": "Microsoft",
+      "version": "27.0.0.0"
+    }
+  ],
+  "screenshots": [],
+  "platform": "27.0.0.0",
+  "application": "27.0.0.0",
+  "runtime": "16.0",
+  "idRanges": [
+    {
+      "from": 50200,
+      "to": 50299
+    }
+  ],
+  "features": [
+    "NoImplicitWith"
+  ],
+  "resourceExposurePolicy": {
+    "allowDebugging": true,
+    "allowDownloadingSource": false,
+    "includeSourceInSymbolFile": false
+  }
+}

@@ -4,7 +4,9 @@
   "appFolders": [
     "Monta Document Capture Utility"
   ],
-  "testFolders": [],
+  "testFolders": [
+    "Monta Document Capture Utility.Test"
+  ],
   "bcptTestFolders": [],
   "repoVersion": "1.5",
   "installApps": [

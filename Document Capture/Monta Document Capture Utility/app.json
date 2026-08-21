@@ -18,6 +18,13 @@
       "version": "27.3.0.0"
     }
   ],
+  "internalsVisibleTo": [
+    {
+      "id": "4bdd7546-226e-4325-8d19-1b5d9fcb4fc5",
+      "name": "Monta Document Capture Utility.Test",
+      "publisher": "Bylov Consulting"
+    }
+  ],
   "screenshots": [],
   "platform": "27.0.0.0",
   "application": "27.0.0.0",
