@@ -1,4 +1,4 @@
-codeunit 50200 "MDC Dup. Reject Tests"
+codeunit 50400 "MDC Dup. Reject Tests"
 {
     Subtype = Test;
     TestPermissions = Disabled;

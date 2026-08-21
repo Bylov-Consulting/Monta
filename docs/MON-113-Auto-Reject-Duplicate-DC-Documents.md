@@ -77,26 +77,41 @@ Continia: capture -> validate -> writes CDC Document Comment (Msg Center ID)
                                   |
                     MDC Dup. Reject Mgt.  (all logic, directly testable)
                                   |
-        setup off? already auto-rejected? not Open? no matching comment? -> exit
+   already auto-rejected? not Open? switch off? no ID? no matching comment? -> exit
                                   |
-      set MDC Auto-Rejected + MDC Auto-Reject Reason -> Modify -> Reject() -> audit comment -> telemetry
+   one Modify(false): Status + Date-Time for Register/Reject
+                    + MDC Auto-Rejected + MDC Auto-Reject Reason
 ```
 
-### Objects
+**Not `Reject()`**, and no audit comment or telemetry — see sections 4 and 5.
 
-Existing IDs in use: tableext 50100, pageext 50101, codeunits 50102/50103/50104. Range is 50100–50199.
+### Objects — as built
 
 | Object | ID | Change |
 |---|---|---|
 | `tableextension "MDC DC Setup Ext"` extends `CDC Document Capture Setup` | 50100 | **+2 fields** |
-| `tableextension "MDC CDC Document Ext"` extends `CDC Document` | 50105 | **new**, 2 fields |
 | `pageextension "MDC DC Setup Card Ext"` | 50101 | **+2 fields** |
+| `tableextension "MDC CDC Document Ext"` extends `CDC Document` | 50105 | **new**, 2 fields |
 | `pageextension "MDC DC Document Card Ext"` extends `CDC Document Card` | 50106 | **new**, 2 read-only fields |
 | `codeunit "MDC Dup. Reject Sub."` | 50107 | **new**, subscriber only |
 | `codeunit "MDC Dup. Reject Mgt."` | 50108 | **new**, the logic |
-| `codeunit "MDC DC Setup Install"` | 50104 | default the new setup fields |
+
+`MDC DC Setup Install` (50104) is **unchanged** — the new switch needs no install code, see section 4.
 
 All object names ≤ 30 chars (AL0305).
+
+### Object ID ranges — check these before adding an app
+
+The test app was first given 50200–50299, which **Monta Payment Reconciliation already owns**, and its test codeunit was 50200, the same ID as `codeunit 50200 "MON Pmt Recon Post"`. Both apps install into the same Monta tenant, so this would have failed at deploy with a duplicate object ID.
+
+**AL-Go compiles each project in isolation, so no compiler ever sees two apps at once** — a collision between sibling apps in one repo is invisible until both `.app` files reach the same tenant. CI cannot catch it as things stand. A CI step that unions the declared `idRanges` across every `app.json` and fails on overlap would catch the next one at PR time.
+
+| App | Range | Uses |
+|---|---|---|
+| Monta Document Capture Utility | 50100–50199 | 50100–50108 |
+| Monta Document Capture Utility.Test | 50400–50499 | 50400 |
+| Monta Payment Reconciliation | 50200–50299 | 50200–50207 |
+| Monta Payment Reconciliation.Test | 50300–50399 | 50300–50303 |
 
 ### Fields
 
