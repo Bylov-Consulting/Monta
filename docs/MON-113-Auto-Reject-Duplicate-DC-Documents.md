@@ -42,11 +42,18 @@ There is **no** dedicated Continia event fired when the duplicate is detected. `
 
 Also verified as available on the `CDC Document` record, callable from our extension:
 
-- `procedure Reject()` — public
+- `procedure Reject()` — public, **but unusable here: it prompts.** See section 6.
 - `procedure HasWarningComments(): Boolean` — public
-- `Status` option members `Open`, `Rejected`, `Registered` (no `New`/`Approved`/`Deleted`)
+- `Status` option members, in order: `Open`, `Registered`, `Rejected`
 - table event `OnAfterReject(var Document)`
 - `procedure Reopen()` is **internal** — users reopen from the CDC page action, we cannot call it
+
+Other Continia details the build corrected, each found by running against DC 27.3 rather than by reading symbols:
+
+- `CDC Document Comment."Entry No."` is **`AutoIncrement`**. Assigning it yourself fails at runtime.
+- `CDC Document Comment.Area` has **six** members — `Capture`, `Validation`, `Processing`, `Match`, `Import`, `Contracts`.
+- `"Comment Type"` is an **`Option`, not an `Enum`**, so it cannot be passed as a typed parameter without restating Continia's member list in our code. Read the members off a record variable instead.
+- `CDC Document Activity Log` is `Access = Internal`; declaring it as a `Record` fails with `AL0161`.
 
 Fallback hooks, both verified to compile, held in reserve for the risks in section 6:
 
@@ -123,18 +130,26 @@ end;
 
 ```al
 internal procedure RejectIfDuplicate(var Document: Record "CDC Document"): Boolean
-internal procedure IsAutoRejectEnabled(): Boolean
-internal procedure GetDuplicateMsgCenterID(): Code[50]
 ```
 
-Guard order inside `RejectIfDuplicate`, all four needed:
+One procedure. The design originally also listed `IsAutoRejectEnabled()` and `GetDuplicateMsgCenterID()`; both were built, then deleted once the setup read was collapsed into a single `Get()` and neither had a caller. Nothing in the suite reached them, so a bug in either would not have failed a test — untested surface that looks tested is worse than none.
 
-1. `Document."MDC Auto-Rejected"` already true → exit. **Without this, a user who reopens a false positive gets it re-rejected on the next validation pass.**
-2. `Document.Status <> Status::Open` → exit.
-3. Setup missing, switch off, or Message Center ID blank → exit.
-4. No `CDC Document Comment` for this document with that Message Center ID and `Comment Type` in {Warning, Error} → exit.
+Guard order inside `RejectIfDuplicate`, cheapest first. The two free document-property checks sit ahead of the setup read, so a document that can never be auto-rejected costs zero database access:
 
-Then: set the two document fields, `Modify(false)`, `Reject()`, add an Information comment via the public `CDC Document Comment.Add(...)`, emit `Session.LogMessage('MON-DC-0002', ...)` matching the existing `MON-DC-0001` telemetry style.
+| # | Guard | Cost | Test that fails without it |
+|---|---|---|---|
+| 1 | `MDC Auto-Rejected` already true → exit | free | `DoesNotRejectAgainAfterReopen` |
+| 2 | `Status <> Status::Open` → exit | free | `DoesNotRejectARegisteredDocument` |
+| 3 | Setup row missing → exit | 1 row | — |
+| 4 | Switch off → exit | same row | `DoesNothingWhenAutoRejectDisabled` |
+| 5 | Message Center ID blank → exit | same row | — |
+| 6 | No comment matching document + ID + Warning/Error → exit | 1 `FindFirst` | `LeavesDocumentUntouchedWhenOtherMsgCenterID`, `IgnoresInformationSeverityComment` |
+
+Guard 2 is an **allow-list, not a deny-list**. With members `Open, Registered, Rejected`, blocking only `Registered` would still let an already-Rejected document be re-rejected and have its `Date-Time for Register/Reject` rewritten, and would silently admit any status Continia adds later.
+
+Then one `Modify(false)` writing `Status`, `Date-Time for Register/Reject`, `MDC Auto-Rejected` and `MDC Auto-Reject Reason`.
+
+**Not `Reject()`** — see section 6. The audit comment and telemetry described in the original design were not built; the two document fields plus the page extension cover the acceptance criterion, and a comment would be deleted by Continia on re-validation anyway.
 
 ### Remaining ticket questions
 
@@ -145,7 +160,9 @@ Then: set the two document fields, `Modify(false)`, `Reject()`, add an Informati
 
 ## 4. Footprint
 
-Two new codeunits, one new tableextension, one new pageextension, four fields, one install line. No new tables, no job queue entry, no scheduled task, no duplicate-detection logic of our own.
+As built: two new codeunits (`MDC Dup. Reject Mgt.` 50108, `MDC Dup. Reject Sub.` 50107), one new tableextension (50105 on `CDC Document`), one new pageextension (50106 on `CDC Document Card`), two fields added to the existing setup tableextension and two to the existing setup page extension. **No install code** — see below. No new tables, no job queue entry, no scheduled task, no duplicate-detection logic of our own.
+
+Install needs nothing because `MDC Auto-Reject Duplicates` carries no `InitValue`, so it is false on a fresh company through `Init()` and false on an existing row because that is the column default. The neighbouring `Disable CDC Cross-Co. Tmpl.` field *does* need explicit handling in `EnsureSetupRecordOnInstall`, precisely because its desired default is `true` and `InitValue` does not backfill existing rows. Ours wants `false`, which is what it already is.
 
 ---
 
@@ -159,21 +176,27 @@ The tests drive `MDC Dup. Reject Mgt.` directly with `CDC Document` and `CDC Doc
 
 **Do this before writing any test:** publish the eight Continia apps from `Document Capture/dependencies/` into a BC 27.3 container and confirm they install. If they refuse without a Continia license, the CLAUDE.md migration/legacy-dependency exception applies — the commit gate cannot be satisfied and this needs an unblock decision, not a workaround.
 
-### Cycles
+### Cycles — as built
 
-Each cycle: `RED:` commit with the failing test, `GREEN:` commit with the implementation, `REFACTOR:` if warranted. `bc-test` run fresh at every commit.
+Seven RED/GREEN pairs plus a REFACTOR, `bc-test` run fresh against container `bcmondc` at every commit. Each RED test is the cycle-1 test with **exactly one token changed**, so there is only one thing that can make it pass.
 
-| # | Test | Proves |
-|---|---|---|
-| 1 | `AutoRejectsWhenDuplicateCommentPresent` — Open document + Warning comment with the configured ID → Status becomes Rejected, `MDC Auto-Rejected` true, `MDC Auto-Reject Reason` equals the comment text | The core requirement |
-| 2 | `LeavesDocumentUntouchedWhenOtherMsgCenterID` — comment present but with a **different** Message Center ID → Status stays Open, flag stays false | We key on the specific message, not on "has a warning". Without this test, a broken implementation that rejects on any warning passes cycle 1. |
-| 3 | `DoesNothingWhenAutoRejectDisabled` — switch off → untouched | Opt-in is real |
-| 4 | `DoesNotRejectAgainAfterReopen` — `MDC Auto-Rejected` true, Status Open → untouched | The false-positive escape hatch survives re-validation |
-| 5 | `AutoRejectsWhenDuplicateCommentIsError` — same as 1 but `Comment Type::Error` | Works whichever severity Monta configures |
-| 6 | `WritesAuditCommentOnAutoReject` — an Information comment carrying the duplicate text exists afterwards | Acceptance criterion "reason discoverable" |
-| 7 | `IgnoresInformationSeverityComment` — comment with the right ID but `Comment Type::Information` → untouched | We act on warnings and errors only, so Monta can dial the message down to Information to switch the behaviour off from Continia's own setup page |
+| # | Test | RED → GREEN | bc-test |
+|---|---|---|---|
+| 1 | `AutoRejectsWhenDuplicateCommentPresent` — asserts Status only | `9ed621b` → `9696b9f` | 0/1 → 1/1 |
+| 2 | `LeavesDocumentUntouchedWhenOtherMsgCenterID` | `5b73f99` → `3518f03` | 1/2 → 2/2 |
+| 3 | `IgnoresInformationSeverityComment` | `b168f75` → `ea04852` | 2/3 → 3/3 |
+| 4 | `DoesNothingWhenAutoRejectDisabled` | `7a63867` → `751fc8a` | 3/4 → 4/4 |
+| 5 | `RecordsReasonWhenAutoRejecting` | `8a7a851` → `a7bcdd8` | 4/5 → 5/5 |
+| 6 | `DoesNotRejectAgainAfterReopen` | `ce1174d` → `eea95de` | 5/6 → 6/6 |
+| 7 | `DoesNotRejectARegisteredDocument` | `8fb06ae` → `da9550d` | 6/7 → 7/7 |
+| — | REFACTOR: one setup row read instead of two | `ea4a0ef` | 7/7 |
+| — | GREEN: subscriber, page extensions | `3c839b0` | 7/7 |
 
-Cycles 2, 4 and 7 are the ones that make the suite prove rather than pass. Tests 1, 3, 5 and 6 alone would go green on an implementation that rejects every document carrying any comment.
+Cycle 1's GREEN deliberately rejected on *any* comment. That is triangulation: it is what makes cycle 2 genuinely fail rather than pass on arrival.
+
+**Two changes from the plan above.** Cycle 7 (`DoesNotRejectARegisteredDocument`) was not in the original list — the `Status <> Open` guard was specified in section 3 and no cycle was scheduled for it, and no existing test could have caught the omission because every one of them builds an Open document. And `AutoRejectsWhenDuplicateCommentIsError` was dropped: after cycle 3 added the severity filter it would have passed on arrival, and the TDD gate rejects a green RED.
+
+The tests that make the suite prove rather than pass are 2, 3, 6 and 7 — the four that assert something is *not* done. Without them an implementation that rejects every document carrying any comment goes green on the rest.
 
 ### Sandbox smoke test — required before merge
 
@@ -188,14 +211,41 @@ The AL test harness bypasses the license layer and never exercises Continia's pi
 
 ---
 
-## 6. Unverified — the tests settle these
+## 6. The four assumptions — two settled, two still open
 
-Continia ships as an encrypted runtime package, so its implementation cannot be read. Four things are assumed and each has a stated fallback.
+Continia ships as an encrypted runtime package, so its implementation cannot be read. Four things were assumed. Running the code settled two of them; the other two need the sandbox.
 
-1. **`ExternalDocumentNumberAlreadyExists` runs before `OnAfterValidateDocument` fires.** If the sandbox test shows the comment is not there yet, latch the hit in a subscriber on `Database::"CDC Document Comment"` `OnAfterInsertEvent` and act in `OnAfterValidateDocument`. Both events compile.
-2. **`Reject()` does not prompt.** CDC has `Register()` and `RegisterYN()` as separate methods but only one `Reject()`, which suggests the confirm lives on the page action. If it does prompt it will fail under the job queue import path — then set `Status::Rejected` and `Date-Time for Register/Reject` directly instead. The tests must run **without** a `ConfirmHandler` so a dialog fails them loudly.
-3. **Our `Modify` is not overwritten by Continia's own `Modify` later in the call stack.** Mitigated by writing our fields before calling `Reject()`. The sandbox test is the arbiter.
-4. **The category's template uses `CDC Purch. - Validation`.** `CDC Template` carries a validation codeunit ID; if Monta's template points elsewhere, the subscriber never fires. Step 2 of the smoke test checks this.
+### Settled — assumption 2 was wrong
+
+**`Reject()` prompts.** It raises `Confirm Do you want to reject the document?` from `CDC Document` (table 6085590) line 7, and there is no reachable way to suppress it: `ResetSkipConfirmMsg()` is a reset, not a setter, and `CDC Template.SkipConfirm(Boolean)` is `internal` to Continia.
+
+This was never only a test problem. The feature runs inside document validation:
+
+- **Job queue / OCR import**, the normal path — `GuiAllowed` is false, so `Confirm` returns its default and the rejection silently does not happen.
+- **Interactive** — a dialog appears in front of a user who took no action.
+
+Either way the feature would have looked correct in review and failed in production, on the path that matters, without an error. It only surfaced by running against the real engine; the call compiles fine.
+
+### Settled — assumption 3 holds, and is now measured
+
+Writing `Status` and `Date-Time for Register/Reject` directly is **equivalent** to `Reject()`, not an approximation. A throwaway diagnostic walked every comparable field of the `CDC Document` row with a `RecordRef` — a generic walk, not a guess list — before and after a real `Reject()` with a `ConfirmHandler`, and found exactly two changes:
+
+```
+Status:                        Open -> Rejected
+Date-Time for Register/Reject: <blank> -> now
+```
+
+No activity-log row, no comment, no `Document Status Text` refresh. `CDC Document Activity Log` and `CDC Document Comment` row counts were unchanged at 0 → 0. The diagnostic was deleted once read; the finding is recorded in a comment on the implementation.
+
+### Still open — the sandbox is the only place these can be answered
+
+1. **`ExternalDocumentNumberAlreadyExists` runs before `OnAfterValidateDocument` fires.** The entire design rests on this. If Continia writes the comment later, `FindFirst` finds nothing and the feature does nothing — indistinguishable from "no duplicate found". Fallback: latch the hit in a subscriber on `Database::"CDC Document Comment"` `OnAfterInsertEvent` and act in `OnAfterValidateDocument`. Both events compile.
+2. **The category's template uses `CDC Purch. - Validation`.** `CDC Template` carries a validation codeunit ID; if Monta's template points elsewhere the subscriber never fires. Step 2 of the smoke test checks this.
+
+Two more that the build added to the list:
+
+3. **`Modify(false)` inside the subscriber.** Every test calls `RejectIfDuplicate` directly. Under Continia's validation the record may be mid-transaction or held by the caller. Per the project's memory note, a licence error on `Modify` is fixed with `Permissions`, not a redesign.
+4. **The real Message Center ID.** Every test invents one. Nobody has yet confirmed the ID of Continia's actual duplicate message, or that it appears in the `CDC Msg. Center Setup Template` lookup the setup field relates to. The container's copy of that table is empty until Continia's "Create Default setup" action runs.
 
 ---
 
