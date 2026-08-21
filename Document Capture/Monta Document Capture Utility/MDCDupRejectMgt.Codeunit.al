@@ -32,7 +32,10 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         // page. The members are read off the record so a change on Continia's side is a
         // compile error here rather than a silent ordinal mismatch.
         DocumentComment.SetFilter("Comment Type", '%1|%2', DocumentComment."Comment Type"::Warning, DocumentComment."Comment Type"::Error);
-        if DocumentComment.IsEmpty() then
+        // FindFirst rather than IsEmpty: the comment text itself is what gets recorded as the
+        // rejection reason, so the row is needed, not just its existence.
+        DocumentComment.SetLoadFields(Comment);
+        if not DocumentComment.FindFirst() then
             exit(false);
 
         // Continia's own Document.Reject() raises a Confirm dialog ("Do you want to reject
@@ -46,6 +49,12 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         // here is therefore equivalent to calling Reject().
         Document.Status := Document.Status::Rejected;
         Document."Date-Time for Register/Reject" := CurrentDateTime();
+        // Acceptance criterion: the reason for an automatic rejection stays discoverable
+        // afterwards. Without these an auto-rejection is indistinguishable from a human one.
+        // Both fields are Text[250], the same width as "CDC Document Comment".Comment, so
+        // Continia's text is stored verbatim.
+        Document."MDC Auto-Rejected" := true;
+        Document."MDC Auto-Reject Reason" := DocumentComment.Comment;
         Document.Modify(false);
         exit(true);
     end;
