@@ -9,8 +9,8 @@ codeunit 50108 "MDC Dup. Reject Mgt."
     /// </summary>
     internal procedure RejectIfDuplicate(var Document: Record "CDC Document"): Boolean
     var
+        Setup: Record "CDC Document Capture Setup";
         DocumentComment: Record "CDC Document Comment";
-        DuplicateMsgCenterID: Code[50];
     begin
         // A document we have already auto-rejected once is left alone for good. A user who
         // reopens a false positive would otherwise have it re-rejected on the next validation
@@ -29,21 +29,29 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         if Document.Status <> Document.Status::Open then
             exit(false);
 
+        // Both setup values in one row read. IsAutoRejectEnabled and GetDuplicateMsgCenterID
+        // each do their own Get with a different SetLoadFields, so calling both here read the
+        // row twice - once per document during OCR import. They stay as they are for callers
+        // outside this procedure.
+        // A missing setup row means the feature was never configured: do nothing, same as the
+        // switch being off.
+        Setup.SetLoadFields("MDC Auto-Reject Duplicates", "MDC Duplicate Msg. Center ID");
+        if not Setup.Get() then
+            exit(false);
+
         // Opt-in per company. This rejects documents with no human in the loop, so nothing
-        // happens until someone turns the switch on. Checked first: when the feature is off
-        // we do no work at all.
-        if not IsAutoRejectEnabled() then
+        // happens until someone turns the switch on.
+        if not Setup."MDC Auto-Reject Duplicates" then
             exit(false);
 
         // No Message Center ID configured means nothing identifies a duplicate, so nothing
         // can be auto-rejected. Do not fall back to "any comment" - Continia writes plenty
         // of unrelated comments during validation.
-        DuplicateMsgCenterID := GetDuplicateMsgCenterID();
-        if DuplicateMsgCenterID = '' then
+        if Setup."MDC Duplicate Msg. Center ID" = '' then
             exit(false);
 
         DocumentComment.SetRange("Document No.", Document."No.");
-        DocumentComment.SetRange("Message Center ID", DuplicateMsgCenterID);
+        DocumentComment.SetRange("Message Center ID", Setup."MDC Duplicate Msg. Center ID");
         // Severity is customer configuration in Continia's Message Center Setup. Dialling the
         // duplicate message down to Information turns the auto-reject off from Continia's own
         // page. The members are read off the record so a change on Continia's side is a
