@@ -13,7 +13,9 @@ codeunit 50200 "MDC Dup. Reject Tests"
         TestDocNoPrefixTok: Label 'MON113', Locked = true;
         TestCategoryCodeTok: Label 'MON113CAT', Locked = true;
         DuplicateCommentTxt: Label 'External Document No. MON113-DUP already exists (in Posted Purchase Invoice, No. = PPI-0001).', Locked = true;
+        OtherWarningCommentTxt: Label 'Vendor Invoice No. is empty.', Locked = true;
         NotRejectedErr: Label 'The document was not rejected after Continia flagged it as a duplicate.';
+        RejectedOnOtherIDErr: Label 'The document was rejected on a comment whose Message Center ID is not the configured duplicate ID.';
 
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
@@ -44,6 +46,39 @@ codeunit 50200 "MDC Dup. Reject Tests"
         // [THEN] The stored document is Rejected
         RereadDocument.Get(Document."No.");
         Assert.AreEqual(RereadDocument.Status::Rejected, RereadDocument.Status, NotRejectedErr);
+    end;
+
+    [Test]
+    procedure LeavesDocumentUntouchedWhenOtherMsgCenterID()
+    var
+        Document: Record "CDC Document";
+        RereadDocument: Record "CDC Document";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        ConfiguredMsgCenterID: Code[50];
+        OtherMsgCenterID: Code[50];
+    begin
+        // [SCENARIO] MON-113: only the Message Center ID configured as the duplicate ID may
+        // trigger an auto-reject. Continia writes many other Warning comments during
+        // validation; none of them are a duplicate and none may reject the document.
+        Initialize();
+
+        // [GIVEN] Auto-reject enabled for Message Center ID A
+        ConfiguredMsgCenterID := AnyMsgCenterID();
+        SetupAutoReject(true, ConfiguredMsgCenterID);
+
+        // [GIVEN] An Open Document Capture document
+        CreateOpenDocument(Document);
+
+        // [GIVEN] A Validation Warning comment carrying a different Message Center ID B
+        OtherMsgCenterID := AnyMsgCenterID();
+        AddComment(Document."No.", OtherMsgCenterID, OtherWarningCommentTxt);
+
+        // [WHEN] The duplicate check runs
+        DupRejectMgt.RejectIfDuplicate(Document);
+
+        // [THEN] The stored document is still Open
+        RereadDocument.Get(Document."No.");
+        Assert.AreEqual(RereadDocument.Status::Open, RereadDocument.Status, RejectedOnOtherIDErr);
     end;
 
     local procedure Initialize()
