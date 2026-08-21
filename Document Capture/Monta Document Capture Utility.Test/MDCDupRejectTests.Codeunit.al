@@ -19,6 +19,8 @@ codeunit 50200 "MDC Dup. Reject Tests"
         RejectedOnOtherIDErr: Label 'The document was rejected on a comment whose Message Center ID is not the configured duplicate ID.';
         RejectedOnInformationErr: Label 'The document was rejected on an Information-severity comment. Only Warning and Error may auto-reject.';
         RejectedWhileDisabledErr: Label 'The document was rejected while MDC Auto-Reject Duplicates is off. The switch must be honoured.';
+        NotFlaggedAutoRejectedErr: Label 'MDC Auto-Rejected was not set. An automatic rejection must be distinguishable from a human one.';
+        ReasonNotRecordedErr: Label 'MDC Auto-Reject Reason does not hold the Continia comment text that caused the rejection.';
 
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
@@ -151,6 +153,42 @@ codeunit 50200 "MDC Dup. Reject Tests"
         // [THEN] The stored document is still Open
         RereadDocument.Get(Document."No.");
         Assert.AreEqual(RereadDocument.Status::Open, RereadDocument.Status, RejectedWhileDisabledErr);
+    end;
+
+    [Test]
+    procedure RecordsReasonWhenAutoRejecting()
+    var
+        Document: Record "CDC Document";
+        RereadDocument: Record "CDC Document";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        MsgCenterID: Code[50];
+    begin
+        // [SCENARIO] MON-113 acceptance criterion: the reason for an automatic rejection is
+        // discoverable by a user afterwards. Without this the document is indistinguishable
+        // from one a human rejected.
+        // Status is not asserted here - AutoRejectsWhenDuplicateCommentPresent already pins it.
+        // This test is about the audit trail.
+        Initialize();
+
+        // [GIVEN] Auto-reject enabled for a specific Message Center ID
+        MsgCenterID := AnyMsgCenterID();
+        SetupAutoReject(true, MsgCenterID);
+
+        // [GIVEN] An Open Document Capture document
+        CreateOpenDocument(Document);
+
+        // [GIVEN] A Validation Warning comment carrying that Message Center ID
+        AddComment(Document."No.", MsgCenterID, DuplicateCommentTxt);
+
+        // [WHEN] The duplicate check runs
+        DupRejectMgt.RejectIfDuplicate(Document);
+
+        // [THEN] The stored document is marked as auto-rejected and carries Continia's own
+        // comment text verbatim. Both fields are Text[250], the same width as
+        // "CDC Document Comment".Comment, so nothing may be truncated.
+        RereadDocument.Get(Document."No.");
+        Assert.IsTrue(RereadDocument."MDC Auto-Rejected", NotFlaggedAutoRejectedErr);
+        Assert.AreEqual(DuplicateCommentTxt, RereadDocument."MDC Auto-Reject Reason", ReasonNotRecordedErr);
     end;
 
     local procedure Initialize()
