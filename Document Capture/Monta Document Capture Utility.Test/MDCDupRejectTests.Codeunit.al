@@ -21,6 +21,7 @@ codeunit 50200 "MDC Dup. Reject Tests"
         RejectedWhileDisabledErr: Label 'The document was rejected while MDC Auto-Reject Duplicates is off. The switch must be honoured.';
         NotFlaggedAutoRejectedErr: Label 'MDC Auto-Rejected was not set. An automatic rejection must be distinguishable from a human one.';
         ReasonNotRecordedErr: Label 'MDC Auto-Reject Reason does not hold the Continia comment text that caused the rejection.';
+        RejectedAfterReopenErr: Label 'A document already marked MDC Auto-Rejected was rejected again after a user reopened it. The user can never win.';
 
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
@@ -191,6 +192,41 @@ codeunit 50200 "MDC Dup. Reject Tests"
         Assert.AreEqual(DuplicateCommentTxt, RereadDocument."MDC Auto-Reject Reason", ReasonNotRecordedErr);
     end;
 
+    [Test]
+    procedure DoesNotRejectAgainAfterReopen()
+    var
+        Document: Record "CDC Document";
+        RereadDocument: Record "CDC Document";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        MsgCenterID: Code[50];
+    begin
+        // [SCENARIO] MON-113: the auto-reject fires on a false positive. A user checks the
+        // document, sees it is not a duplicate, and reopens it from Continia's Reopen action.
+        // Validation runs again, the duplicate comment is still there, and without this guard
+        // we reject it a second time - the user can never win and every false positive turns
+        // into a support ticket.
+        // MDC Auto-Rejected is what makes the document remember, and it survives Continia
+        // deleting and rewriting its comments on re-validation.
+        Initialize();
+
+        // [GIVEN] Auto-reject enabled for a specific Message Center ID
+        MsgCenterID := AnyMsgCenterID();
+        SetupAutoReject(true, MsgCenterID);
+
+        // [GIVEN] A document we auto-rejected once, which a user has since reopened
+        CreateReopenedAutoRejectedDocument(Document);
+
+        // [GIVEN] Continia's duplicate comment still sitting on it
+        AddComment(Document."No.", MsgCenterID, DuplicateCommentTxt);
+
+        // [WHEN] Validation runs again and the duplicate check fires a second time
+        DupRejectMgt.RejectIfDuplicate(Document);
+
+        // [THEN] The document the user reopened is left Open
+        RereadDocument.Get(Document."No.");
+        Assert.AreEqual(RereadDocument.Status::Open, RereadDocument.Status, RejectedAfterReopenErr);
+    end;
+
     local procedure Initialize()
     begin
         AnyLib.SetDefaultSeed();
@@ -231,6 +267,21 @@ codeunit 50200 "MDC Dup. Reject Tests"
         Document."No." := AnyDocumentNo();
         Document."Document Category Code" := EnsureDocumentCategory();
         Document.Status := Document.Status::Open;
+        Document.Insert(false);
+    end;
+
+    // An Open document that carries MDC Auto-Rejected - what a document looks like after we
+    // auto-rejected it once and a user reopened it. A separate helper rather than a parameter
+    // on CreateOpenDocument so the four earlier tests keep calling exactly what they called
+    // before. The returned record carries the flag, not just the stored row, because
+    // RejectIfDuplicate reads it off the record it is passed.
+    local procedure CreateReopenedAutoRejectedDocument(var Document: Record "CDC Document")
+    begin
+        Document.Init();
+        Document."No." := AnyDocumentNo();
+        Document."Document Category Code" := EnsureDocumentCategory();
+        Document.Status := Document.Status::Open;
+        Document."MDC Auto-Rejected" := true;
         Document.Insert(false);
     end;
 
