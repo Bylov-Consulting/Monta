@@ -11,6 +11,7 @@ codeunit 50108 "MDC Dup. Reject Mgt."
     var
         Setup: Record "CDC Document Capture Setup";
         DocumentComment: Record "CDC Document Comment";
+        TelemetryDims: Dictionary of [Text, Text];
     begin
         // A document we have already auto-rejected once is left alone for good. A user who
         // reopens a false positive would otherwise have it re-rejected on the next validation
@@ -79,6 +80,24 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         Document."MDC Auto-Rejected" := true;
         Document."MDC Auto-Reject Reason" := DocumentComment.Comment;
         Document.Modify(false);
+
+        // Auto-rejection is silent and destructive. When Monta asks "where did this invoice
+        // go", this is what answers how often it fires and on which message.
+        // The comment text is deliberately NOT a dimension: it carries vendor and invoice
+        // numbers, which is customer content and does not belong in Application Insights.
+        TelemetryDims.Add('DocumentNo', Document."No.");
+        TelemetryDims.Add('MessageCenterID', Setup."MDC Duplicate Msg. Center ID");
+        TelemetryDims.Add('DocumentCategoryCode', Document."Document Category Code");
+        Session.LogMessage(
+            'MON-DC-0002',
+            AutoRejectedTelemetryLbl,
+            Verbosity::Normal,
+            DataClassification::SystemMetadata,
+            TelemetryScope::ExtensionPublisher,
+            TelemetryDims);
         exit(true);
     end;
+
+    var
+        AutoRejectedTelemetryLbl: Label 'Monta Utility auto-rejected a Document Capture document flagged as a duplicate.', Locked = true;
 }
