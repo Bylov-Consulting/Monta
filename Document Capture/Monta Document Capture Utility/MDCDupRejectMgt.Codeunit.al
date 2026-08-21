@@ -29,10 +29,8 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         if Document.Status <> Document.Status::Open then
             exit(false);
 
-        // Both setup values in one row read. IsAutoRejectEnabled and GetDuplicateMsgCenterID
-        // each do their own Get with a different SetLoadFields, so calling both here read the
-        // row twice - once per document during OCR import. They stay as they are for callers
-        // outside this procedure.
+        // Both setup values come from one row read - this runs once per document during OCR
+        // import, so a second Get would double the reads on the setup table for nothing.
         // A missing setup row means the feature was never configured: do nothing, same as the
         // switch being off.
         Setup.SetLoadFields("MDC Auto-Reject Duplicates", "MDC Duplicate Msg. Center ID");
@@ -82,25 +80,5 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         Document."MDC Auto-Reject Reason" := DocumentComment.Comment;
         Document.Modify(false);
         exit(true);
-    end;
-
-    internal procedure IsAutoRejectEnabled(): Boolean
-    var
-        Setup: Record "CDC Document Capture Setup";
-    begin
-        Setup.SetLoadFields("MDC Auto-Reject Duplicates");
-        if not Setup.Get() then
-            exit(false);
-        exit(Setup."MDC Auto-Reject Duplicates");
-    end;
-
-    internal procedure GetDuplicateMsgCenterID(): Code[50]
-    var
-        Setup: Record "CDC Document Capture Setup";
-    begin
-        Setup.SetLoadFields("MDC Duplicate Msg. Center ID");
-        if not Setup.Get() then
-            exit('');
-        exit(Setup."MDC Duplicate Msg. Center ID");
     end;
 }
