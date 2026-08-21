@@ -20,6 +20,15 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         if Document."MDC Auto-Rejected" then
             exit(false);
 
+        // Only an Open document may be auto-rejected. A Registered one has already become a
+        // purchase invoice in BC - rejecting it after the fact would leave the two records
+        // contradicting each other, silently, because nobody watches a registered document.
+        // Allow-list rather than deny-list: it also covers an already-Rejected document, whose
+        // "Date-Time for Register/Reject" would otherwise be rewritten, and any status
+        // Continia adds in a future release.
+        if Document.Status <> Document.Status::Open then
+            exit(false);
+
         // Opt-in per company. This rejects documents with no human in the loop, so nothing
         // happens until someone turns the switch on. Checked first: when the feature is off
         // we do no work at all.
