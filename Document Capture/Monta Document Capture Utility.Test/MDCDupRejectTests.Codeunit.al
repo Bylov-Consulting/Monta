@@ -14,8 +14,10 @@ codeunit 50200 "MDC Dup. Reject Tests"
         TestCategoryCodeTok: Label 'MON113CAT', Locked = true;
         DuplicateCommentTxt: Label 'External Document No. MON113-DUP already exists (in Posted Purchase Invoice, No. = PPI-0001).', Locked = true;
         OtherWarningCommentTxt: Label 'Vendor Invoice No. is empty.', Locked = true;
+        InformationCommentTxt: Label 'External Document No. MON113-INF already exists (in Posted Purchase Invoice, No. = PPI-0002).', Locked = true;
         NotRejectedErr: Label 'The document was not rejected after Continia flagged it as a duplicate.';
         RejectedOnOtherIDErr: Label 'The document was rejected on a comment whose Message Center ID is not the configured duplicate ID.';
+        RejectedOnInformationErr: Label 'The document was rejected on an Information-severity comment. Only Warning and Error may auto-reject.';
 
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
@@ -81,6 +83,41 @@ codeunit 50200 "MDC Dup. Reject Tests"
         Assert.AreEqual(RereadDocument.Status::Open, RereadDocument.Status, RejectedOnOtherIDErr);
     end;
 
+    [Test]
+    procedure IgnoresInformationSeverityComment()
+    var
+        Document: Record "CDC Document";
+        RereadDocument: Record "CDC Document";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        MsgCenterID: Code[50];
+    begin
+        // [SCENARIO] MON-113: severity is customer configuration in Continia's Message Center
+        // Setup. Dialling the duplicate message down to Information is how a customer turns
+        // the auto-reject off from Continia's own page, without touching our switch. Only
+        // Warning and Error may auto-reject.
+        // Everything here matches AutoRejectsWhenDuplicateCommentPresent except the severity -
+        // the configured Message Center ID is set and the comment carries it, so a pass here
+        // can only come from the severity check.
+        Initialize();
+
+        // [GIVEN] Auto-reject enabled for a specific Message Center ID
+        MsgCenterID := AnyMsgCenterID();
+        SetupAutoReject(true, MsgCenterID);
+
+        // [GIVEN] An Open Document Capture document
+        CreateOpenDocument(Document);
+
+        // [GIVEN] A Validation comment carrying that same Message Center ID, but at Information
+        AddInformationComment(Document."No.", MsgCenterID, InformationCommentTxt);
+
+        // [WHEN] The duplicate check runs
+        DupRejectMgt.RejectIfDuplicate(Document);
+
+        // [THEN] The stored document is still Open
+        RereadDocument.Get(Document."No.");
+        Assert.AreEqual(RereadDocument.Status::Open, RereadDocument.Status, RejectedOnInformationErr);
+    end;
+
     local procedure Initialize()
     begin
         AnyLib.SetDefaultSeed();
@@ -132,6 +169,23 @@ codeunit 50200 "MDC Dup. Reject Tests"
         // "Entry No." is AutoIncrement - the platform assigns it on Insert.
         DocumentComment."Document No." := DocumentNo;
         DocumentComment."Comment Type" := DocumentComment."Comment Type"::Warning;
+        DocumentComment.Area := DocumentComment.Area::Validation;
+        DocumentComment.Comment := CommentTxt;
+        DocumentComment."Message Center ID" := MsgCenterID;
+        DocumentComment.Insert(false);
+    end;
+
+    // Same as AddComment but at Information severity. A separate helper rather than a
+    // Comment Type parameter: "Comment Type" is an Option owned by Continia, so a parameter
+    // would have to restate its members here and would silently drift if Continia changes them.
+    local procedure AddInformationComment(DocumentNo: Code[20]; MsgCenterID: Code[50]; CommentTxt: Text[250])
+    var
+        DocumentComment: Record "CDC Document Comment";
+    begin
+        DocumentComment.Init();
+        // "Entry No." is AutoIncrement - the platform assigns it on Insert.
+        DocumentComment."Document No." := DocumentNo;
+        DocumentComment."Comment Type" := DocumentComment."Comment Type"::Information;
         DocumentComment.Area := DocumentComment.Area::Validation;
         DocumentComment.Comment := CommentTxt;
         DocumentComment."Message Center ID" := MsgCenterID;
