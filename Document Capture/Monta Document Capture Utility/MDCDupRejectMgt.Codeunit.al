@@ -12,6 +12,14 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         DocumentComment: Record "CDC Document Comment";
         DuplicateMsgCenterID: Code[50];
     begin
+        // A document we have already auto-rejected once is left alone for good. A user who
+        // reopens a false positive would otherwise have it re-rejected on the next validation
+        // pass and could never win. Read off the passed record, which is the one Continia is
+        // validating - not a re-read. Checked before the setup so that toggling the switch off
+        // and back on does not re-reject every false positive a user has since reopened.
+        if Document."MDC Auto-Rejected" then
+            exit(false);
+
         // Opt-in per company. This rejects documents with no human in the loop, so nothing
         // happens until someone turns the switch on. Checked first: when the feature is off
         // we do no work at all.
