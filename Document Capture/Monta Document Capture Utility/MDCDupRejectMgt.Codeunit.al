@@ -12,6 +12,12 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         DocumentComment: Record "CDC Document Comment";
         DuplicateMsgCenterID: Code[50];
     begin
+        // Opt-in per company. This rejects documents with no human in the loop, so nothing
+        // happens until someone turns the switch on. Checked first: when the feature is off
+        // we do no work at all.
+        if not IsAutoRejectEnabled() then
+            exit(false);
+
         // No Message Center ID configured means nothing identifies a duplicate, so nothing
         // can be auto-rejected. Do not fall back to "any comment" - Continia writes plenty
         // of unrelated comments during validation.
