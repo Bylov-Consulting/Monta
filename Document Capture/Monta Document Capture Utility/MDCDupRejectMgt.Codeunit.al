@@ -21,6 +21,11 @@ codeunit 50108 "MDC Dup. Reject Mgt."
 
         DocumentComment.SetRange("Document No.", Document."No.");
         DocumentComment.SetRange("Message Center ID", DuplicateMsgCenterID);
+        // Severity is customer configuration in Continia's Message Center Setup. Dialling the
+        // duplicate message down to Information turns the auto-reject off from Continia's own
+        // page. The members are read off the record so a change on Continia's side is a
+        // compile error here rather than a silent ordinal mismatch.
+        DocumentComment.SetFilter("Comment Type", '%1|%2', DocumentComment."Comment Type"::Warning, DocumentComment."Comment Type"::Error);
         if DocumentComment.IsEmpty() then
             exit(false);
 
