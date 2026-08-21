@@ -10,8 +10,17 @@ codeunit 50108 "MDC Dup. Reject Mgt."
     internal procedure RejectIfDuplicate(var Document: Record "CDC Document"): Boolean
     var
         DocumentComment: Record "CDC Document Comment";
+        DuplicateMsgCenterID: Code[50];
     begin
+        // No Message Center ID configured means nothing identifies a duplicate, so nothing
+        // can be auto-rejected. Do not fall back to "any comment" - Continia writes plenty
+        // of unrelated comments during validation.
+        DuplicateMsgCenterID := GetDuplicateMsgCenterID();
+        if DuplicateMsgCenterID = '' then
+            exit(false);
+
         DocumentComment.SetRange("Document No.", Document."No.");
+        DocumentComment.SetRange("Message Center ID", DuplicateMsgCenterID);
         if DocumentComment.IsEmpty() then
             exit(false);
 
