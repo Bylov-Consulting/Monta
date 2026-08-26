@@ -13,8 +13,9 @@ codeunit 50108 "MDC Dup. Reject Mgt."
     internal procedure RejectIfDuplicate(var Document: Record "CDC Document"): Boolean
     var
         Setup: Record "CDC Document Capture Setup";
-        DocumentComment: Record "CDC Document Comment";
         TelemetryDims: Dictionary of [Text, Text];
+        Reason: Text[250];
+        DecidedBy: Text;
     begin
         // A document we have already auto-rejected once is left alone for good. A user who
         // reopens a false positive would otherwise have it re-rejected on the next validation
@@ -46,23 +47,7 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         if not Setup."MDC Auto-Reject Duplicates" then
             exit(false);
 
-        // No Message Center ID configured means nothing identifies a duplicate, so nothing
-        // can be auto-rejected. Do not fall back to "any comment" - Continia writes plenty
-        // of unrelated comments during validation.
-        if Setup."MDC Duplicate Msg. Center ID" = '' then
-            exit(false);
-
-        DocumentComment.SetRange("Document No.", Document."No.");
-        DocumentComment.SetRange("Message Center ID", Setup."MDC Duplicate Msg. Center ID");
-        // Severity is customer configuration in Continia's Message Center Setup. Dialling the
-        // duplicate message down to Information turns the auto-reject off from Continia's own
-        // page. The members are read off the record so a change on Continia's side is a
-        // compile error here rather than a silent ordinal mismatch.
-        DocumentComment.SetFilter("Comment Type", '%1|%2', DocumentComment."Comment Type"::Warning, DocumentComment."Comment Type"::Error);
-        // FindFirst rather than IsEmpty: the comment text itself is what gets recorded as the
-        // rejection reason, so the row is needed, not just its existence.
-        DocumentComment.SetLoadFields(Comment);
-        if not DocumentComment.FindFirst() then
+        if not FindDuplicate(Document, Setup."MDC Duplicate Msg. Center ID", Reason, DecidedBy) then
             exit(false);
 
         // Continia's own Document.Reject() raises a Confirm dialog ("Do you want to reject
@@ -78,18 +63,20 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         Document."Date-Time for Register/Reject" := CurrentDateTime();
         // Acceptance criterion: the reason for an automatic rejection stays discoverable
         // afterwards. Without these an auto-rejection is indistinguishable from a human one.
-        // Both fields are Text[250], the same width as "CDC Document Comment".Comment, so
-        // Continia's text is stored verbatim.
+        // One Modify for all four fields, whichever path decided.
         Document."MDC Auto-Rejected" := true;
-        Document."MDC Auto-Reject Reason" := DocumentComment.Comment;
+        Document."MDC Auto-Reject Reason" := Reason;
         Document.Modify(false);
 
         // Auto-rejection is silent and destructive. When Monta asks "where did this invoice
-        // go", this is what answers how often it fires and on which message.
-        // The comment text is deliberately NOT a dimension: it carries vendor and invoice
+        // go", this is what answers how often it fires and which path decided.
+        // DecidedBy replaced the Message Center ID as a dimension: when our own lookup answers
+        // there is no ID at all, and knowing which of the two paths fired is worth more for
+        // diagnosis than an ID that is blank half the time.
+        // The reason text is deliberately NOT a dimension: it carries vendor and invoice
         // numbers, which is customer content and does not belong in Application Insights.
         TelemetryDims.Add('DocumentNo', Document."No.");
-        TelemetryDims.Add('MessageCenterID', Setup."MDC Duplicate Msg. Center ID");
+        TelemetryDims.Add('DecidedBy', DecidedBy);
         TelemetryDims.Add('DocumentCategoryCode', Document."Document Category Code");
         Session.LogMessage(
             'MON-DC-0002',
@@ -98,6 +85,90 @@ codeunit 50108 "MDC Dup. Reject Mgt."
             DataClassification::SystemMetadata,
             TelemetryScope::ExtensionPublisher,
             TelemetryDims);
+        exit(true);
+    end;
+
+    /// <summary>
+    /// Runs the two detection paths in order and returns the reason and the path that decided.
+    /// </summary>
+    local procedure FindDuplicate(var Document: Record "CDC Document"; DuplicateMsgCenterID: Code[50]; var Reason: Text[250]; var DecidedBy: Text): Boolean
+    var
+        VendDocNo: Code[50];
+        SourceVendorNo: Code[20];
+        DocumentType: Integer;
+    begin
+        Reason := '';
+        DecidedBy := '';
+
+        // Our own lookup first: it covers what MON-113 is actually about - the number already
+        // sits on a posted entry or an open purchase document. Continia records those two as a
+        // comment with a BLANK Message Center ID, so the fallback below can never see them.
+        if TryGetLookupValues(Document, VendDocNo, DocumentType, SourceVendorNo) then
+            if HasDuplicate(VendDocNo, DocumentType, SourceVendorNo, Reason) then begin
+                DecidedBy := OwnLookupTok;
+                exit(true);
+            end;
+
+        // Fallback: a duplicate against another OPEN Document Capture document still sitting in
+        // the journal. Nothing is posted and no purchase document exists yet, so our lookup
+        // cannot see it - but Continia routes that one message through the Message Center, so
+        // it is the one case an ID can identify.
+        if HasDuplicateMsgCenterComment(Document, DuplicateMsgCenterID, Reason) then begin
+            DecidedBy := MsgCenterTok;
+            exit(true);
+        end;
+
+        exit(false);
+    end;
+
+    /// <summary>
+    /// Turns a Document Capture document into the three values the lookup needs. Returns false
+    /// when the document does not yield usable ones, so the Message Center path still runs.
+    /// </summary>
+    local procedure TryGetLookupValues(var Document: Record "CDC Document"; var VendDocNo: Code[50]; var DocumentType: Integer; var SourceVendorNo: Code[20]): Boolean
+    var
+        PurchDocMgt: Codeunit "CDC Purch. Doc. - Management";
+    begin
+        VendDocNo := PurchDocMgt.GetDocumentNo(Document);
+        DocumentType := PurchDocMgt.GetDocumentType(Document);
+        // GetSourceID returns Text[250] because a document category can point at any table and
+        // any key field. For a purchase document it resolves a Vendor "No.", which is Code[20],
+        // so nothing can be truncated here - the width is the table's, not this document's.
+        // GetSourceID is used rather than the "Source Record No." field because it is what
+        // Continia itself calls to find the vendor.
+        SourceVendorNo := CopyStr(Document.GetSourceID(), 1, MaxStrLen(SourceVendorNo));
+        exit((VendDocNo <> '') and (SourceVendorNo <> ''));
+    end;
+
+    /// <summary>
+    /// The Message Center fallback: Continia flagged a journal duplicate under the configured
+    /// Message Center ID.
+    /// </summary>
+    local procedure HasDuplicateMsgCenterComment(var Document: Record "CDC Document"; DuplicateMsgCenterID: Code[50]; var Reason: Text[250]): Boolean
+    var
+        DocumentComment: Record "CDC Document Comment";
+    begin
+        // A blank ID now switches off THIS path only - it no longer disables the feature. That
+        // matters more than it looks: Continia writes its posted and unposted duplicate
+        // comments with a blank Message Center ID, so filtering on '' would match those and
+        // every other unrouted comment on the document.
+        if DuplicateMsgCenterID = '' then
+            exit(false);
+
+        DocumentComment.SetRange("Document No.", Document."No.");
+        DocumentComment.SetRange("Message Center ID", DuplicateMsgCenterID);
+        // Severity is customer configuration in Continia's Message Center Setup. Dialling the
+        // duplicate message down to Information turns this path off from Continia's own page.
+        // The members are read off the record so a change on Continia's side is a compile error
+        // here rather than a silent ordinal mismatch.
+        DocumentComment.SetFilter("Comment Type", '%1|%2', DocumentComment."Comment Type"::Warning, DocumentComment."Comment Type"::Error);
+        // FindFirst rather than IsEmpty: the comment text itself is what gets recorded as the
+        // rejection reason, so the row is needed, not just its existence.
+        DocumentComment.SetLoadFields(Comment);
+        if not DocumentComment.FindFirst() then
+            exit(false);
+
+        Reason := DocumentComment.Comment;
         exit(true);
     end;
 
@@ -278,5 +349,7 @@ codeunit 50108 "MDC Dup. Reject Mgt."
     var
         DuplicateOnPostedEntryMsg: Label 'Document no. %1 already exists on posted vendor ledger entry %2.', Comment = '%1 = vendor document number, %2 = Vendor Ledger Entry No.';
         DuplicateOnUnpostedDocMsg: Label 'Document no. %1 already exists on open purchase document %2, which has not been posted.', Comment = '%1 = vendor document number, %2 = Purchase Header No.';
+        OwnLookupTok: Label 'OwnLookup', Locked = true;
+        MsgCenterTok: Label 'MessageCenterComment', Locked = true;
         AutoRejectedTelemetryLbl: Label 'Monta Utility auto-rejected a Document Capture document flagged as a duplicate.', Locked = true;
 }

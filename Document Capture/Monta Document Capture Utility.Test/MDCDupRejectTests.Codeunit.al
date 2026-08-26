@@ -32,7 +32,7 @@ codeunit 50400 "MDC Dup. Reject Tests"
         ReasonNotRecordedErr: Label 'MDC Auto-Reject Reason does not hold the Continia comment text that caused the rejection.';
         RejectedAfterReopenErr: Label 'A document already marked MDC Auto-Rejected was rejected again after a user reopened it. The user can never win.';
         RejectedRegisteredDocErr: Label 'A Registered document was rejected. It has already become a purchase invoice, so the two records would contradict each other.';
-        RejectedOnBlankIDErr: Label 'A document was rejected while Duplicate Message Center ID is blank. Nothing identifies a duplicate, so nothing may be rejected.';
+        RejectedOnBlankIDErr: Label 'A document was rejected on a comment while Duplicate Message Center ID is blank. A blank ID must match no comment at all - Continia writes its own duplicate comments with a blank ID.';
         NoDuplicateFoundErr: Label 'HasDuplicate did not report a duplicate although a posted invoice for the same vendor already carries that External Document No.';
         DuplicateAcrossVendorsErr: Label 'HasDuplicate reported a duplicate although the posted invoice belongs to a different vendor. A legitimate invoice would be auto-rejected with no user involved.';
         ReasonNotBlankErr: Label 'HasDuplicate returned false but left text in Reason. A false verdict must not leave a reason behind for a later cycle to write onto a document.';
@@ -297,24 +297,26 @@ codeunit 50400 "MDC Dup. Reject Tests"
     end;
 
     [Test]
-    procedure DoesNothingWhenMsgCenterIDBlank()
+    procedure JournalPathIsOffWhenMsgCenterIDBlank()
     var
         Document: Record "CDC Document";
         RereadDocument: Record "CDC Document";
         DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
     begin
-        // [SCENARIO] MON-113: a company turns the switch on but never picks a Message Center
-        // ID. Nothing identifies a duplicate, so nothing may be rejected.
-        // The comment below deliberately carries a blank Message Center ID too. Without the
-        // blank-ID guard the code runs SetRange("Message Center ID", ''), which MATCHES that
-        // comment - so every document carrying a Warning gets auto-rejected. That is the real
-        // failure this test exists to prevent, not a theoretical one.
+        // [SCENARIO] MON-113 v2: a blank Duplicate Message Center ID no longer disables the
+        // feature - it switches off the JOURNAL path only. Our own lookup keeps running, which
+        // RejectsWhenOwnLookupFindsAPostedDuplicate covers with a blank ID as well.
+        // What must still hold is that a blank ID never matches comments. This is sharper than
+        // it was under v1: Continia writes its posted and unposted duplicate comments with a
+        // BLANK Message Center ID, so SetRange("Message Center ID", '') would match those and
+        // every other unrouted comment on the document. The document below captures nothing, so
+        // our own lookup finds no values and the comment is the only thing that could fire.
         Initialize();
 
         // [GIVEN] Auto-reject enabled but no Message Center ID chosen
         SetupAutoReject(true, '');
 
-        // [GIVEN] An Open Document Capture document
+        // [GIVEN] An Open Document Capture document with no captured vendor or document number
         CreateOpenDocument(Document);
 
         // [GIVEN] A Validation Warning comment that also carries no Message Center ID
