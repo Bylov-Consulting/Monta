@@ -48,6 +48,8 @@ codeunit 50400 "MDC Dup. Reject Tests"
         PlainVendorLookupBrokenErr: Label 'HasDuplicate missed a duplicate for a vendor whose Pay-to Vendor No. is blank. Resolving pay-to must not break the ordinary case where the vendor pays for itself.';
         BlankDocNoMatchedErr: Label 'HasDuplicate reported a duplicate for a document whose number was never captured. A blank number matches every posted entry that also has none, so this rejects the documents most likely to be incomplete.';
         UnknownVendorMatchedErr: Label 'HasDuplicate reported a duplicate for a vendor number that does not exist. A missing vendor must exit, not fall through and look up the raw number.';
+        PostedAndUnpostedMissedErr: Label 'HasDuplicate reported no duplicate although the document number sits on BOTH a posted entry and an open purchase invoice for that vendor.';
+        UnpostedOverwrotePostedReasonErr: Label 'Adding an open purchase invoice changed the reason. The posted document must win, or the reason points the user at an unposted document when a posted one already exists.';
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
     var
@@ -714,6 +716,48 @@ codeunit 50400 "MDC Dup. Reject Tests"
         // [THEN] It is not a duplicate, no reason is left behind, and nothing threw
         Assert.IsFalse(DuplicateFound, UnknownVendorMatchedErr);
         Assert.AreEqual('', Reason, ReasonNotBlankErr);
+    end;
+
+    [Test]
+    procedure PostedDuplicateWinsOverUnposted()
+    var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        VendorNo: Code[20];
+        ExternalDocNo: Code[35];
+        PostedOnlyReason: Text[250];
+        Reason: Text[250];
+        DuplicateFound: Boolean;
+    begin
+        // [SCENARIO] MON-113 v2: a document number can sit on BOTH a posted entry and an open
+        // purchase invoice. Continia checks posted first and only falls through to unposted
+        // when posted missed, so the posted document wins. If the unposted lookup overwrote the
+        // reason, a user chasing the collision would be sent to an open invoice while the real
+        // one is already posted.
+        // Until now nothing pinned this - every other fixture creates one or the other, never
+        // both - and it is the property most at risk when the two lookups are split apart.
+        Initialize();
+
+        // [GIVEN] A vendor with a posted invoice carrying an External Document No.
+        VendorNo := CreateVendor();
+        ExternalDocNo := AnyExternalDocNo();
+        CreatePostedInvoiceEntry(VendorNo, ExternalDocNo);
+
+        // [GIVEN] The posted wording captured from that very entry, before anything else
+        // exists. Same vendor and same number, so the expected text is exact - a second vendor
+        // would carry a different document number and a different ledger Entry No. and could
+        // never compare equal. Nothing about the Label is hardcoded here.
+        DupRejectMgt.HasDuplicate(ExternalDocNo, CDCTemplateFieldRule."Document Type"::Invoice, VendorNo, PostedOnlyReason);
+
+        // [GIVEN] An open purchase invoice for the same vendor carrying the same number
+        CreateUnpostedInvoice(VendorNo, ExternalDocNo);
+
+        // [WHEN] The duplicate check runs against both
+        DuplicateFound := DupRejectMgt.HasDuplicate(ExternalDocNo, CDCTemplateFieldRule."Document Type"::Invoice, VendorNo, Reason);
+
+        // [THEN] It is still a duplicate, and the reason is unchanged - the posted one
+        Assert.IsTrue(DuplicateFound, PostedAndUnpostedMissedErr);
+        Assert.AreEqual(PostedOnlyReason, Reason, UnpostedOverwrotePostedReasonErr);
     end;
 
     local procedure Initialize()
