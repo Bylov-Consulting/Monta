@@ -161,8 +161,25 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         // Continia also runs "if PurchHeader.SetCurrentKey(...) then;" first - a legacy NAV 7
         // guard against a key that may not exist. Omitted: the key exists in BC 27.
         PurchaseHeader.SetLoadFields("No.");
-        PurchaseHeader.SetRange("Document Type", PurchaseHeader."Document Type"::Invoice);
-        PurchaseHeader.SetRange("Vendor Invoice No.", CopyStr(VendDocNo, 1, MaxStrLen(PurchaseHeader."Vendor Invoice No.")));
+        // The vendor's own document number is not one field filtered two ways - it lives in a
+        // DIFFERENT FIELD per document type. So each arm sets two ranges, the type and the
+        // matching number field, exactly as Continia does.
+        // No else arm: an excluded document type cannot reach here, because the case above
+        // already exited for it. An "else exit(false)" would be unreachable. That is safe only
+        // while that first gate stands - if it ever stops exiting, this case needs an else.
+        case DocumentType of
+            CDCTemplateFieldRule."Document Type"::Invoice,
+            CDCTemplateFieldRule."Document Type"::Prepayment:
+                begin
+                    PurchaseHeader.SetRange("Document Type", PurchaseHeader."Document Type"::Invoice);
+                    PurchaseHeader.SetRange("Vendor Invoice No.", CopyStr(VendDocNo, 1, MaxStrLen(PurchaseHeader."Vendor Invoice No.")));
+                end;
+            CDCTemplateFieldRule."Document Type"::"Credit Memo":
+                begin
+                    PurchaseHeader.SetRange("Document Type", PurchaseHeader."Document Type"::"Credit Memo");
+                    PurchaseHeader.SetRange("Vendor Cr. Memo No.", CopyStr(VendDocNo, 1, MaxStrLen(PurchaseHeader."Vendor Cr. Memo No.")));
+                end;
+        end;
         PurchaseHeader.SetRange("Pay-to Vendor No.", SourceVendorNo);
         if not PurchaseHeader.FindFirst() then
             exit(false);
