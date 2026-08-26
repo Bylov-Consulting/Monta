@@ -3,7 +3,8 @@ codeunit 50108 "MDC Dup. Reject Mgt."
     Access = Internal;
     Permissions = tabledata "CDC Document" = m,
                   tabledata "Vendor Ledger Entry" = r,
-                  tabledata "Purchase Header" = r;
+                  tabledata "Purchase Header" = r,
+                  tabledata Vendor = r;
 
     /// <summary>
     /// Rejects a Document Capture document when Continia's own duplicate check has flagged it.
@@ -110,8 +111,10 @@ codeunit 50108 "MDC Dup. Reject Mgt."
     internal procedure HasDuplicate(VendDocNo: Code[50]; DocumentType: Integer; SourceVendorNo: Code[20]; var Reason: Text[250]): Boolean
     var
         CDCTemplateFieldRule: Record "CDC Template Field Rule";
+        Vendor: Record Vendor;
         VendLedgEntry: Record "Vendor Ledger Entry";
         PurchaseHeader: Record "Purchase Header";
+        PayToVendorNo: Code[20];
     begin
         // Mirrors the posted-document half of the "CHECK EXTERNAL DOCUMENT NO." block in
         // Continia's codeunit 6085705 "CDC Purch. - Validation", read from the extracted
@@ -121,6 +124,24 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         // records it as a "CDC Document Comment" with a BLANK "Message Center ID" - nothing
         // can filter on it - and the comment text is a Label, so it is translated.
         Reason := '';
+
+        // A vendor may be paid through another vendor - a subsidiary billing through its
+        // parent, or a factored receivable. Continia scopes the duplicate check to the PAYING
+        // vendor, so the same invoice arriving from two subsidiaries of one parent is caught.
+        // DIVERGENCE FROM CONTINIA, deliberate: Continia calls Vendor.Get unguarded, but it
+        // does so in OnRun where a missing vendor errors the whole validation. HasDuplicate
+        // returns a boolean and must not throw, so a missing vendor exits false - no vendor
+        // means no duplicate we can establish.
+        // Continia also keeps a UsePayTo flag here. It exists only to choose between two
+        // comment wordings that name the pay-to vendor; our labels do not name it, so we need
+        // the resolved number and not the flag. Nothing was dropped by accident.
+        Vendor.SetLoadFields("Pay-to Vendor No.");
+        if not Vendor.Get(SourceVendorNo) then
+            exit(false);
+        if Vendor."Pay-to Vendor No." <> '' then
+            PayToVendorNo := Vendor."Pay-to Vendor No."
+        else
+            PayToVendorNo := Vendor."No.";
 
         // DELIBERATE DIVERGENCE FROM CONTINIA. Continia's case statement has no else arm, so
         // for Order, Receipt and " " it leaves the lookup unfiltered on document type. We exit
@@ -144,7 +165,7 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         // Vendors number their own invoices, so the same document number turning up for two
         // different vendors is ordinary. Without this filter a legitimate invoice from one
         // vendor is auto-rejected because another vendor once used that number.
-        VendLedgEntry.SetRange("Vendor No.", SourceVendorNo);
+        VendLedgEntry.SetRange("Vendor No.", PayToVendorNo);
         // Posted wins, and returns here. Everything below is Continia's else branch: the
         // unposted lookup runs ONLY when the posted one missed. Written as an early exit rather
         // than a nested else, but the property that matters is the same - a document colliding
@@ -157,7 +178,7 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         // The document may not be posted yet, in which case nothing is in Vendor Ledger Entry
         // and the collision is with an open purchase invoice. Note Continia filters
         // "Purchase Header" on "Pay-to Vendor No." while filtering the ledger on "Vendor No.";
-        // both receive the same resolved vendor, so both get SourceVendorNo here.
+        // both receive the same resolved vendor, so both get PayToVendorNo here.
         // Continia also runs "if PurchHeader.SetCurrentKey(...) then;" first - a legacy NAV 7
         // guard against a key that may not exist. Omitted: the key exists in BC 27.
         PurchaseHeader.SetLoadFields("No.");
@@ -180,7 +201,7 @@ codeunit 50108 "MDC Dup. Reject Mgt."
                     PurchaseHeader.SetRange("Vendor Cr. Memo No.", CopyStr(VendDocNo, 1, MaxStrLen(PurchaseHeader."Vendor Cr. Memo No.")));
                 end;
         end;
-        PurchaseHeader.SetRange("Pay-to Vendor No.", SourceVendorNo);
+        PurchaseHeader.SetRange("Pay-to Vendor No.", PayToVendorNo);
         if not PurchaseHeader.FindFirst() then
             exit(false);
 
