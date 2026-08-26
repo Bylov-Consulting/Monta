@@ -108,6 +108,7 @@ codeunit 50108 "MDC Dup. Reject Mgt."
     /// </summary>
     internal procedure HasDuplicate(VendDocNo: Code[50]; DocumentType: Integer; SourceVendorNo: Code[20]; var Reason: Text[250]): Boolean
     var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
         VendLedgEntry: Record "Vendor Ledger Entry";
     begin
         // Mirrors the posted-document half of the "CHECK EXTERNAL DOCUMENT NO." block in
@@ -118,6 +119,22 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         // records it as a "CDC Document Comment" with a BLANK "Message Center ID" - nothing
         // can filter on it - and the comment text is a Label, so it is translated.
         Reason := '';
+
+        // DELIBERATE DIVERGENCE FROM CONTINIA. Continia's case statement has no else arm, so
+        // for Order, Receipt and " " it leaves the lookup unfiltered on document type. We exit
+        // instead. Two reasons: MON-113 is scoped to invoices and credit memos only, and an
+        // unfiltered type lookup is a false-positive source we would be choosing to inherit.
+        // So: safer than Continia here, and different from Continia - both on purpose.
+        // Invoice and Prepayment share one arm because Continia maps both to a posted Invoice.
+        case DocumentType of
+            CDCTemplateFieldRule."Document Type"::Invoice,
+            CDCTemplateFieldRule."Document Type"::Prepayment:
+                VendLedgEntry.SetRange("Document Type", VendLedgEntry."Document Type"::Invoice);
+            CDCTemplateFieldRule."Document Type"::"Credit Memo":
+                VendLedgEntry.SetRange("Document Type", VendLedgEntry."Document Type"::"Credit Memo");
+            else
+                exit(false);
+        end;
 
         VendLedgEntry.SetCurrentKey("External Document No.");
         VendLedgEntry.SetLoadFields("Entry No.");
