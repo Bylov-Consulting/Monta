@@ -44,6 +44,8 @@ codeunit 50400 "MDC Dup. Reject Tests"
         NoUnpostedCrMemoDuplicateErr: Label 'HasDuplicate did not report a duplicate although an unposted purchase credit memo for the same vendor already carries that Vendor Cr. Memo No.';
         UnpostedCrMemoReasonBlankErr: Label 'HasDuplicate reported an unposted credit-memo duplicate but left Reason blank.';
         CrMemoMatchedUnpostedInvoiceErr: Label 'HasDuplicate reported a duplicate although the only match is an unposted INVOICE and the incoming document is a CREDIT MEMO. They are not the same kind of document.';
+        PayToVendorNotResolvedErr: Label 'HasDuplicate did not resolve the pay-to vendor. The sending vendor pays through another vendor, and that paying vendor already carries this document number.';
+        PlainVendorLookupBrokenErr: Label 'HasDuplicate missed a duplicate for a vendor whose Pay-to Vendor No. is blank. Resolving pay-to must not break the ordinary case where the vendor pays for itself.';
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
     var
@@ -590,6 +592,67 @@ codeunit 50400 "MDC Dup. Reject Tests"
         Assert.AreEqual('', Reason, ReasonNotBlankErr);
     end;
 
+    [Test]
+    procedure ResolvesPayToVendorWhenLookingUpDuplicates()
+    var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        SendingVendorNo: Code[20];
+        PayingVendorNo: Code[20];
+        ExternalDocNo: Code[35];
+        Reason: Text[250];
+    begin
+        // [SCENARIO] MON-113 v2: a vendor paying through another vendor is a normal setup - a
+        // subsidiary billing through its parent, or a factored receivable. Continia scopes the
+        // duplicate check to the PAYING vendor, not to whoever sent the document.
+        // Scoping it to the sender instead misses real duplicates: the same invoice arriving
+        // from two subsidiaries of one parent settles against the same payable and the accounts
+        // payable team considers it the same vendor.
+        Initialize();
+
+        // [GIVEN] Vendor A sends the documents but pays through vendor B
+        PayingVendorNo := CreateVendor();
+        SendingVendorNo := CreateVendorPayingThrough(PayingVendorNo);
+
+        // [GIVEN] A posted invoice already carrying that document number, on the PAYING vendor
+        ExternalDocNo := AnyExternalDocNo();
+        CreatePostedInvoiceEntry(PayingVendorNo, ExternalDocNo);
+
+        // [WHEN] The document arrives from the SENDING vendor with that same number
+        // [THEN] It is a duplicate, because A pays through B and B already has it
+        Assert.IsTrue(
+            DupRejectMgt.HasDuplicate(ExternalDocNo, CDCTemplateFieldRule."Document Type"::Invoice, SendingVendorNo, Reason),
+            PayToVendorNotResolvedErr);
+    end;
+
+    [Test]
+    procedure UsesTheVendorItselfWhenNoPayToVendorIsSet()
+    var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        VendorNo: Code[20];
+        ExternalDocNo: Code[35];
+        Reason: Text[250];
+    begin
+        // [SCENARIO] MON-113 v2: the other branch of Continia's resolution - a blank
+        // "Pay-to Vendor No." means the vendor pays for itself, so the lookup uses its own
+        // "No.". This is the ordinary case and covers almost every vendor.
+        // It guards the obvious way to get pay-to resolution wrong: reading a blank pay-to and
+        // filtering the lookup on '' , which would silently stop finding anything at all.
+        Initialize();
+
+        // [GIVEN] A vendor with no Pay-to Vendor No., carrying a posted invoice
+        VendorNo := CreateVendor();
+        ExternalDocNo := AnyExternalDocNo();
+        CreatePostedInvoiceEntry(VendorNo, ExternalDocNo);
+
+        // [WHEN] That same document number arrives again from that vendor
+        // [THEN] It is a duplicate, found under the vendor's own number
+        Assert.IsTrue(
+            DupRejectMgt.HasDuplicate(ExternalDocNo, CDCTemplateFieldRule."Document Type"::Invoice, VendorNo, Reason),
+            PlainVendorLookupBrokenErr);
+    end;
+
     local procedure Initialize()
     begin
         AnyLib.SetDefaultSeed();
@@ -627,6 +690,18 @@ codeunit 50400 "MDC Dup. Reject Tests"
     end;
 
     local procedure CreateVendor(): Code[20]
+    begin
+        exit(CreateVendorWithPayTo(''));
+    end;
+
+    // A vendor that sends the documents but is paid through another vendor - a subsidiary
+    // billing through its parent, or a factored receivable.
+    local procedure CreateVendorPayingThrough(PayToVendorNo: Code[20]): Code[20]
+    begin
+        exit(CreateVendorWithPayTo(PayToVendorNo));
+    end;
+
+    local procedure CreateVendorWithPayTo(PayToVendorNo: Code[20]): Code[20]
     var
         Vendor: Record Vendor;
         Candidate: Code[20];
@@ -637,6 +712,7 @@ codeunit 50400 "MDC Dup. Reject Tests"
         Vendor.Init();
         Vendor."No." := Candidate;
         Vendor.Name := Candidate;
+        Vendor."Pay-to Vendor No." := PayToVendorNo;
         Vendor.Insert(false);
         exit(Candidate);
     end;
