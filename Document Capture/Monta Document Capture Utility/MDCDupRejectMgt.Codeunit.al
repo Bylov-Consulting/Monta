@@ -122,6 +122,10 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         VendLedgEntry.SetCurrentKey("External Document No.");
         VendLedgEntry.SetLoadFields("Entry No.");
         VendLedgEntry.SetRange("External Document No.", CopyStr(VendDocNo, 1, MaxStrLen(VendLedgEntry."External Document No.")));
+        // Vendors number their own invoices, so the same document number turning up for two
+        // different vendors is ordinary. Without this filter a legitimate invoice from one
+        // vendor is auto-rejected because another vendor once used that number.
+        VendLedgEntry.SetRange("Vendor No.", SourceVendorNo);
         if not VendLedgEntry.FindFirst() then
             exit(false);
 
