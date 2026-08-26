@@ -8,13 +8,19 @@ codeunit 50400 "MDC Dup. Reject Tests"
                   tabledata "CDC Document Category" = imd,
                   tabledata Vendor = imd,
                   tabledata "Vendor Ledger Entry" = imd,
-                  tabledata "Purchase Header" = imd;
+                  tabledata "Purchase Header" = imd,
+                  tabledata "CDC Template Field" = imd,
+                  tabledata "CDC Document Value" = imd,
+                  tabledata "CDC Record ID Tree" = imd;
 
     var
         AnyLib: Codeunit Any;
         Assert: Codeunit "Library Assert";
         TestDocNoPrefixTok: Label 'MON113', Locked = true;
         TestCategoryCodeTok: Label 'MON113CAT', Locked = true;
+        TestTemplateNoTok: Label 'MON113TMPL', Locked = true;
+        DocNoFieldCodeTok: Label 'DOCNO', Locked = true;
+        DocTypeFieldCodeTok: Label 'DOCTYPE', Locked = true;
         DuplicateCommentTxt: Label 'External Document No. MON113-DUP already exists (in Posted Purchase Invoice, No. = PPI-0001).', Locked = true;
         OtherWarningCommentTxt: Label 'Vendor Invoice No. is empty.', Locked = true;
         InformationCommentTxt: Label 'External Document No. MON113-INF already exists (in Posted Purchase Invoice, No. = PPI-0002).', Locked = true;
@@ -48,6 +54,8 @@ codeunit 50400 "MDC Dup. Reject Tests"
         PlainVendorLookupBrokenErr: Label 'HasDuplicate missed a duplicate for a vendor whose Pay-to Vendor No. is blank. Resolving pay-to must not break the ordinary case where the vendor pays for itself.';
         BlankDocNoMatchedErr: Label 'HasDuplicate reported a duplicate for a document whose number was never captured. A blank number matches every posted entry that also has none, so this rejects the documents most likely to be incomplete.';
         UnknownVendorMatchedErr: Label 'HasDuplicate reported a duplicate for a vendor number that does not exist. A missing vendor must exit, not fall through and look up the raw number.';
+        NotRejectedByOwnLookupErr: Label 'The document was not rejected although our own lookup finds a posted invoice with that vendor document number. Duplicate Message Center ID is blank here, so the Message Center path cannot be what answers this.';
+        ReasonNotFromOwnLookupErr: Label 'MDC Auto-Reject Reason does not match what HasDuplicate produces for the same document number, document type and vendor.';
         PostedAndUnpostedMissedErr: Label 'HasDuplicate reported no duplicate although the document number sits on BOTH a posted entry and an open purchase invoice for that vendor.';
         UnpostedOverwrotePostedReasonErr: Label 'Adding an open purchase invoice changed the reason. The posted document must win, or the reason points the user at an unposted document when a posted one already exists.';
     [Test]
@@ -323,7 +331,7 @@ codeunit 50400 "MDC Dup. Reject Tests"
     [Test]
     procedure RejectsWhenPostedInvoiceHasSameExtDocNo()
     var
-        TemplateFieldRule: Record "CDC Template Field Rule";
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
         DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
         VendorNo: Code[20];
         ExternalDocNo: Code[35];
@@ -344,14 +352,14 @@ codeunit 50400 "MDC Dup. Reject Tests"
         // [WHEN] The same vendor document number arrives again as an invoice
         // [THEN] It is reported as a duplicate
         Assert.IsTrue(
-            DupRejectMgt.HasDuplicate(ExternalDocNo, TemplateFieldRule."Document Type"::Invoice, VendorNo, Reason),
+            DupRejectMgt.HasDuplicate(ExternalDocNo, CDCTemplateFieldRule."Document Type"::Invoice, VendorNo, Reason),
             NoDuplicateFoundErr);
     end;
 
     [Test]
     procedure IgnoresPostedInvoiceForADifferentVendor()
     var
-        TemplateFieldRule: Record "CDC Template Field Rule";
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
         DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
         VendorANo: Code[20];
         VendorBNo: Code[20];
@@ -374,7 +382,7 @@ codeunit 50400 "MDC Dup. Reject Tests"
         CreatePostedInvoiceEntry(VendorBNo, ExternalDocNo);
 
         // [WHEN] Vendor A sends an invoice carrying that same document number
-        DuplicateFound := DupRejectMgt.HasDuplicate(ExternalDocNo, TemplateFieldRule."Document Type"::Invoice, VendorANo, Reason);
+        DuplicateFound := DupRejectMgt.HasDuplicate(ExternalDocNo, CDCTemplateFieldRule."Document Type"::Invoice, VendorANo, Reason);
 
         // [THEN] It is not a duplicate, and no reason is left behind
         Assert.IsFalse(DuplicateFound, DuplicateAcrossVendorsErr);
@@ -384,7 +392,7 @@ codeunit 50400 "MDC Dup. Reject Tests"
     [Test]
     procedure IgnoresPostedCreditMemoWhenDocumentIsInvoice()
     var
-        TemplateFieldRule: Record "CDC Template Field Rule";
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
         DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
         VendorNo: Code[20];
         ExternalDocNo: Code[35];
@@ -404,7 +412,7 @@ codeunit 50400 "MDC Dup. Reject Tests"
         CreatePostedCreditMemoEntry(VendorNo, ExternalDocNo);
 
         // [WHEN] An INVOICE arrives from that vendor carrying the same document number
-        DuplicateFound := DupRejectMgt.HasDuplicate(ExternalDocNo, TemplateFieldRule."Document Type"::Invoice, VendorNo, Reason);
+        DuplicateFound := DupRejectMgt.HasDuplicate(ExternalDocNo, CDCTemplateFieldRule."Document Type"::Invoice, VendorNo, Reason);
 
         // [THEN] It is not a duplicate, and no reason is left behind
         Assert.IsFalse(DuplicateFound, DuplicateAcrossDocTypesErr);
@@ -414,7 +422,7 @@ codeunit 50400 "MDC Dup. Reject Tests"
     [Test]
     procedure RejectsWhenPostedCreditMemoHasSameExtDocNo()
     var
-        TemplateFieldRule: Record "CDC Template Field Rule";
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
         DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
         VendorNo: Code[20];
         ExternalDocNo: Code[35];
@@ -434,7 +442,7 @@ codeunit 50400 "MDC Dup. Reject Tests"
         // [WHEN] A CREDIT MEMO arrives from that vendor carrying the same document number
         // [THEN] It is reported as a duplicate
         Assert.IsTrue(
-            DupRejectMgt.HasDuplicate(ExternalDocNo, TemplateFieldRule."Document Type"::"Credit Memo", VendorNo, Reason),
+            DupRejectMgt.HasDuplicate(ExternalDocNo, CDCTemplateFieldRule."Document Type"::"Credit Memo", VendorNo, Reason),
             NoCreditMemoDuplicateErr);
     end;
 
@@ -760,12 +768,56 @@ codeunit 50400 "MDC Dup. Reject Tests"
         Assert.AreEqual(PostedOnlyReason, Reason, UnpostedOverwrotePostedReasonErr);
     end;
 
+    [Test]
+    procedure RejectsWhenOwnLookupFindsAPostedDuplicate()
+    var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
+        Document: Record "CDC Document";
+        RereadDocument: Record "CDC Document";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        VendorNo: Code[20];
+        ExternalDocNo: Code[35];
+        ExpectedReason: Text[250];
+    begin
+        // [SCENARIO] MON-113 v2 wiring: RejectIfDuplicate has never called HasDuplicate. It
+        // still routes entirely through the Message Center ID, which cannot see this case at
+        // all - Continia writes the posted-duplicate comment with a BLANK Message Center ID.
+        // Duplicate Message Center ID is left blank on purpose, so the Message Center path
+        // exits at its own guard and only our own lookup can produce a rejection here.
+        Initialize();
+
+        // [GIVEN] Auto-reject on, but no Message Center ID configured
+        SetupAutoReject(true, '');
+
+        // [GIVEN] A vendor with a posted invoice carrying an External Document No.
+        VendorNo := CreateVendor();
+        ExternalDocNo := AnyExternalDocNo();
+        CreatePostedInvoiceEntry(VendorNo, ExternalDocNo);
+
+        // [GIVEN] An Open Document Capture document that captures that number for that vendor
+        CreateCapturedDocument(Document, VendorNo, ExternalDocNo);
+
+        // [GIVEN] What our own lookup produces for the same three inputs. Captured rather than
+        // hardcoded so the test pins that the document carries THAT reason, not some text.
+        DupRejectMgt.HasDuplicate(ExternalDocNo, CDCTemplateFieldRule."Document Type"::Invoice, VendorNo, ExpectedReason);
+
+        // [WHEN] The duplicate check runs
+        DupRejectMgt.RejectIfDuplicate(Document);
+
+        // [THEN] The document is rejected, marked, and carries our lookup's reason
+        RereadDocument.Get(Document."No.");
+        Assert.AreEqual(RereadDocument.Status::Rejected, RereadDocument.Status, NotRejectedByOwnLookupErr);
+        Assert.IsTrue(RereadDocument."MDC Auto-Rejected", NotFlaggedAutoRejectedErr);
+        Assert.AreEqual(ExpectedReason, RereadDocument."MDC Auto-Reject Reason", ReasonNotFromOwnLookupErr);
+    end;
+
     local procedure Initialize()
     begin
         AnyLib.SetDefaultSeed();
         ClearTestDocuments();
         ClearTestVendors();
         ClearTestPurchaseHeaders();
+        ClearTestCaptureData();
     end;
 
     local procedure ClearTestDocuments()
@@ -980,6 +1032,119 @@ codeunit 50400 "MDC Dup. Reject Tests"
         Document.Insert(false);
     end;
 
+    // A captured Document Capture document: Open, tied to our template, and carrying the two
+    // things Continia reads to drive the duplicate check - the vendor (through the record ID
+    // tree) and the document number (through a captured field value).
+    local procedure CreateCapturedDocument(var Document: Record "CDC Document"; VendorNo: Code[20]; VendDocNo: Code[35])
+    begin
+        EnsureTemplateFields();
+
+        Document.Init();
+        Document."No." := AnyDocumentNo();
+        Document."Document Category Code" := EnsureDocumentCategory();
+        Document."Template No." := CopyStr(TestTemplateNoTok, 1, MaxStrLen(Document."Template No."));
+        Document."Source Record ID Tree ID" := CreateVendorRecordIDTree(VendorNo);
+        Document.Status := Document.Status::Open;
+        Document.Insert(false);
+
+        CaptureHeaderValue(Document."No.", CopyStr(DocNoFieldCodeTok, 1, 20), VendDocNo);
+    end;
+
+    // Two template fields, and BOTH are required.
+    // DOCNO: "CDC Purch. Doc. - Management".GetDocumentNo reads it through
+    // CaptureMgt.GetText, which returns '' immediately if the template field does not exist -
+    // no captured value would ever be found.
+    // DOCTYPE: this one is the trap. GetDocumentType starts with
+    //     if not Field.Get(Template, Header, 'DOCTYPE') then exit(GetDocumentTypeFromEDoc(...))
+    // and GetDocumentTypeFromEDoc returns 0 (" ") unless the tenant has an eDocuments licence.
+    // Zero is exactly the document type our TryResolveDocumentKind rejects, so a fixture that
+    // omits this row produces a test that dies at the type gate and looks like broken wiring.
+    local procedure EnsureTemplateFields()
+    begin
+        EnsureTemplateField(CopyStr(DocNoFieldCodeTok, 1, 20));
+        EnsureTemplateField(CopyStr(DocTypeFieldCodeTok, 1, 20));
+    end;
+
+    local procedure EnsureTemplateField(FieldCode: Code[20])
+    var
+        CDCTemplateField: Record "CDC Template Field";
+    begin
+        if CDCTemplateField.Get(TestTemplateNoTok, CDCTemplateField.Type::Header, FieldCode) then
+            exit;
+        CDCTemplateField.Init();
+        CDCTemplateField."Template No." := CopyStr(TestTemplateNoTok, 1, MaxStrLen(CDCTemplateField."Template No."));
+        CDCTemplateField.Type := CDCTemplateField.Type::Header;
+        CDCTemplateField.Code := FieldCode;
+        CDCTemplateField."Data Type" := CDCTemplateField."Data Type"::Text;
+        CDCTemplateField.Insert(false);
+    end;
+
+    // One captured header value. "Is Value" and "Line No." are what CaptureMgt.GetFieldValue
+    // filters on, alongside Document No., Type and Code.
+    // No DOCTYPE value is captured anywhere, and that is deliberate: with the DOCTYPE template
+    // field present and no value, Continia's GetDocumentType falls all the way through to
+    // "exit(FieldRule.\"Document Type\"::Invoice)" - codeunit 6085709. Our fixture gets Invoice
+    // because of that fall-through default, not because anything asked for Invoice. Diff that
+    // procedure if this test ever starts reporting a different document type.
+    local procedure CaptureHeaderValue(DocumentNo: Code[20]; FieldCode: Code[20]; ValueTxt: Text[250])
+    var
+        DocumentValue: Record "CDC Document Value";
+    begin
+        DocumentValue.Init();
+        DocumentValue."Document No." := DocumentNo;
+        DocumentValue.Type := DocumentValue.Type::Header;
+        DocumentValue.Code := FieldCode;
+        DocumentValue."Line No." := 0;
+        DocumentValue."Is Value" := true;
+        DocumentValue."Template No." := CopyStr(TestTemplateNoTok, 1, MaxStrLen(DocumentValue."Template No."));
+        DocumentValue."Value (Text)" := ValueTxt;
+        DocumentValue.Insert(false);
+    end;
+
+    // CDC Document.GetSourceID walks CDC Record ID Tree by "Parent ID" until "Field No."
+    // matches the category's "Source Field No.", then returns "Value (Text)". A single row
+    // whose field number matches exits on the first pass, so no tree has to be built.
+    local procedure CreateVendorRecordIDTree(VendorNo: Code[20]): Integer
+    var
+        RecordIDTree: Record "CDC Record ID Tree";
+        Vendor: Record Vendor;
+    begin
+        RecordIDTree.Init();
+        RecordIDTree.ID := NextRecordIDTreeID();
+        RecordIDTree."Table No." := Database::Vendor;
+        RecordIDTree."Field No." := Vendor.FieldNo("No.");
+        RecordIDTree."Value (Text)" := VendorNo;
+        RecordIDTree.Insert(false);
+        exit(RecordIDTree.ID);
+    end;
+
+    // "ID" is not AutoIncrement on CDC Record ID Tree - the caller assigns it.
+    local procedure NextRecordIDTreeID(): Integer
+    var
+        RecordIDTree: Record "CDC Record ID Tree";
+    begin
+        if RecordIDTree.FindLast() then
+            exit(RecordIDTree.ID + 1);
+        exit(1);
+    end;
+
+    // The record ID tree has no MON113-shaped key of its own, so it is reaped by what it points
+    // at: our vendor numbers.
+    local procedure ClearTestCaptureData()
+    var
+        DocumentValue: Record "CDC Document Value";
+        CDCTemplateField: Record "CDC Template Field";
+        RecordIDTree: Record "CDC Record ID Tree";
+    begin
+        DocumentValue.SetFilter("Document No.", TestDocNoPrefixTok + '*');
+        DocumentValue.DeleteAll(false);
+        CDCTemplateField.SetRange("Template No.", TestTemplateNoTok);
+        CDCTemplateField.DeleteAll(false);
+        RecordIDTree.SetRange("Table No.", Database::Vendor);
+        RecordIDTree.SetFilter("Value (Text)", TestDocNoPrefixTok + '*');
+        RecordIDTree.DeleteAll(false);
+    end;
+
     local procedure AddComment(DocumentNo: Code[20]; MsgCenterID: Code[50]; CommentTxt: Text[250])
     var
         DocumentComment: Record "CDC Document Comment";
@@ -1011,9 +1176,15 @@ codeunit 50400 "MDC Dup. Reject Tests"
         DocumentComment.Insert(false);
     end;
 
+    // "Source Table No." and "Source Field No." are what CDC Document.GetSourceID() reads to
+    // turn a document into a vendor number: it calls GetKeyValue("Source Record ID Tree ID",
+    // DocCat."Source Field No."), and GetKeyValue does Field.Get(TableNo, FieldNo) against the
+    // real Field virtual table - so the field number has to be a genuine Vendor field.
+    // The eight v1 tests never call GetSourceID, so these two values change nothing for them.
     local procedure EnsureDocumentCategory(): Code[10]
     var
         DocumentCategory: Record "CDC Document Category";
+        Vendor: Record Vendor;
     begin
         if not DocumentCategory.Get(TestCategoryCodeTok) then begin
             DocumentCategory.Init();
@@ -1021,6 +1192,9 @@ codeunit 50400 "MDC Dup. Reject Tests"
             DocumentCategory.Description := TestCategoryCodeTok;
             DocumentCategory.Insert(false);
         end;
+        DocumentCategory."Source Table No." := Database::Vendor;
+        DocumentCategory."Source Field No." := Vendor.FieldNo("No.");
+        DocumentCategory.Modify(false);
         exit(DocumentCategory.Code);
     end;
 
@@ -1047,6 +1221,11 @@ codeunit 50400 "MDC Dup. Reject Tests"
         exit(Candidate);
     end;
 
+    // The Code[35] return type matters and has no obvious tripwire. It uppercases the value
+    // before it is stored in "CDC Document Value"."Value (Text)", which is Text. Continia's
+    // GetDocumentNo returns Code[50], so the value comes back uppercased either way - and the
+    // ledger entry's "External Document No." is Code[35], uppercased at insert. Generate this
+    // as Text instead and the two sides stop matching for a reason nothing points at.
     local procedure AnyExternalDocNo(): Code[35]
     var
         Result: Code[35];
