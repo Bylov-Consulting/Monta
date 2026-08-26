@@ -27,6 +27,8 @@ codeunit 50400 "MDC Dup. Reject Tests"
         RejectedRegisteredDocErr: Label 'A Registered document was rejected. It has already become a purchase invoice, so the two records would contradict each other.';
         RejectedOnBlankIDErr: Label 'A document was rejected while Duplicate Message Center ID is blank. Nothing identifies a duplicate, so nothing may be rejected.';
         NoDuplicateFoundErr: Label 'HasDuplicate did not report a duplicate although a posted invoice for the same vendor already carries that External Document No.';
+        DuplicateAcrossVendorsErr: Label 'HasDuplicate reported a duplicate although the posted invoice belongs to a different vendor. A legitimate invoice would be auto-rejected with no user involved.';
+        ReasonNotBlankErr: Label 'HasDuplicate returned false but left text in Reason. A false verdict must not leave a reason behind for a later cycle to write onto a document.';
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
     var
@@ -323,6 +325,39 @@ codeunit 50400 "MDC Dup. Reject Tests"
         Assert.IsTrue(
             DupRejectMgt.HasDuplicate(ExternalDocNo, TemplateFieldRule."Document Type"::Invoice, VendorNo, Reason),
             NoDuplicateFoundErr);
+    end;
+
+    [Test]
+    procedure IgnoresPostedInvoiceForADifferentVendor()
+    var
+        TemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        VendorANo: Code[20];
+        VendorBNo: Code[20];
+        ExternalDocNo: Code[35];
+        Reason: Text[250];
+        DuplicateFound: Boolean;
+    begin
+        // [SCENARIO] MON-113 v2: vendors number their own invoices, so two vendors reusing the
+        // same document number is ordinary, not a duplicate. Continia scopes its lookup to the
+        // pay-to vendor and so must we.
+        // Two vendors are the point of this test: with one vendor it would pass against an
+        // unfiltered lookup and prove nothing. Without the vendor filter a legitimate invoice
+        // from vendor A is auto-rejected because vendor B once used that number.
+        Initialize();
+
+        // [GIVEN] Two vendors, and a posted invoice belonging to vendor B
+        VendorANo := CreateVendor();
+        VendorBNo := CreateVendor();
+        ExternalDocNo := AnyExternalDocNo();
+        CreatePostedInvoiceEntry(VendorBNo, ExternalDocNo);
+
+        // [WHEN] Vendor A sends an invoice carrying that same document number
+        DuplicateFound := DupRejectMgt.HasDuplicate(ExternalDocNo, TemplateFieldRule."Document Type"::Invoice, VendorANo, Reason);
+
+        // [THEN] It is not a duplicate, and no reason is left behind
+        Assert.IsFalse(DuplicateFound, DuplicateAcrossVendorsErr);
+        Assert.AreEqual('', Reason, ReasonNotBlankErr);
     end;
 
     local procedure Initialize()
