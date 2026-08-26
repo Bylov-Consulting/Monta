@@ -125,6 +125,15 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         // can filter on it - and the comment text is a Label, so it is translated.
         Reason := '';
 
+        // A document whose number was never captured has nothing to match on. Without this,
+        // SetRange("External Document No.", '') matches every posted entry that also has no
+        // external document number - usually many - so the documents most likely to be
+        // incomplete would be the ones auto-rejected.
+        // Position mirrors Continia: it tests VendDocNo <> '' in the single condition that
+        // gates the whole block, including the vendor lookup below. Not arbitrary.
+        if VendDocNo = '' then
+            exit(false);
+
         // A vendor may be paid through another vendor - a subsidiary billing through its
         // parent, or a factored receivable. Continia scopes the duplicate check to the PAYING
         // vendor, so the same invoice arriving from two subsidiaries of one parent is caught.
