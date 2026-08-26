@@ -103,26 +103,24 @@ codeunit 50108 "MDC Dup. Reject Mgt."
 
     /// <summary>
     /// Decides whether a vendor document number already exists on a posted or unposted purchase
-    /// document for the same pay-to vendor. Mirrors the checks Continia's
-    /// "CDC Purch. - Validation" runs, because Continia records the hit as a comment with a
-    /// blank Message Center ID, which nothing can filter on.
-    /// Reason returns the text to store on the document when the answer is true.
+    /// document for the same pay-to vendor.
+    /// Reason returns the text to store on the document when the answer is true, and is left
+    /// untouched when it is false.
     /// </summary>
+    /// <remarks>
+    /// Mirrors the "CHECK EXTERNAL DOCUMENT NO." block of Continia's codeunit 6085705
+    /// "CDC Purch. - Validation", read from the extracted source of DC 28.3 (Monta's sandbox).
+    /// The 26.2 copy has identical filters, so 27.3 is the same. Diff against that block when
+    /// upgrading Continia.
+    /// We repeat the lookup instead of reading Continia's own verdict because Continia records
+    /// it as a "CDC Document Comment" with a BLANK "Message Center ID" - nothing can filter on
+    /// it - and the comment text is a Label, so it is translated.
+    /// </remarks>
     internal procedure HasDuplicate(VendDocNo: Code[50]; DocumentType: Integer; SourceVendorNo: Code[20]; var Reason: Text[250]): Boolean
     var
-        CDCTemplateFieldRule: Record "CDC Template Field Rule";
-        Vendor: Record Vendor;
-        VendLedgEntry: Record "Vendor Ledger Entry";
-        PurchaseHeader: Record "Purchase Header";
         PayToVendorNo: Code[20];
+        IsCreditMemo: Boolean;
     begin
-        // Mirrors the posted-document half of the "CHECK EXTERNAL DOCUMENT NO." block in
-        // Continia's codeunit 6085705 "CDC Purch. - Validation", read from the extracted
-        // source of DC 28.3 (Monta's sandbox). The 26.2 copy has identical filters, so 27.3
-        // is the same. Diff against that block when upgrading Continia.
-        // We repeat the lookup instead of reading Continia's own verdict because Continia
-        // records it as a "CDC Document Comment" with a BLANK "Message Center ID" - nothing
-        // can filter on it - and the comment text is a Label, so it is translated.
         Reason := '';
 
         // A document whose number was never captured has nothing to match on. Without this,
@@ -134,13 +132,38 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         if VendDocNo = '' then
             exit(false);
 
+        if not TryResolvePayToVendor(SourceVendorNo, PayToVendorNo) then
+            exit(false);
+
+        if not TryResolveDocumentKind(DocumentType, IsCreditMemo) then
+            exit(false);
+
+        // Posted wins. The unposted lookup runs ONLY when the posted one missed, so a document
+        // colliding with both can never have its posted reason overwritten by the unposted one -
+        // a user chasing the collision is sent to the posted document, not to an open invoice.
+        // PostedDuplicateWinsOverUnposted pins this; it is the property most at risk here.
+        if HasPostedDuplicate(VendDocNo, IsCreditMemo, PayToVendorNo, Reason) then
+            exit(true);
+        exit(HasUnpostedDuplicate(VendDocNo, IsCreditMemo, PayToVendorNo, Reason));
+    end;
+
+    /// <summary>
+    /// Resolves the vendor whose payables the document settles against. Returns false when the
+    /// vendor does not exist.
+    /// </summary>
+    local procedure TryResolvePayToVendor(SourceVendorNo: Code[20]; var PayToVendorNo: Code[20]): Boolean
+    var
+        Vendor: Record Vendor;
+    begin
         // A vendor may be paid through another vendor - a subsidiary billing through its
         // parent, or a factored receivable. Continia scopes the duplicate check to the PAYING
         // vendor, so the same invoice arriving from two subsidiaries of one parent is caught.
         // DIVERGENCE FROM CONTINIA, deliberate: Continia calls Vendor.Get unguarded, but it
         // does so in OnRun where a missing vendor errors the whole validation. HasDuplicate
-        // returns a boolean and must not throw, so a missing vendor exits false - no vendor
-        // means no duplicate we can establish.
+        // returns a boolean and must not throw - an error escaping here would propagate out of
+        // our subscriber and kill Continia's whole validation run, breaking OCR import rather
+        // than one document. A missing vendor exits false: no vendor, no duplicate we can
+        // establish.
         // Continia also keeps a UsePayTo flag here. It exists only to choose between two
         // comment wordings that name the pay-to vendor; our labels do not name it, so we need
         // the resolved number and not the flag. Nothing was dropped by accident.
@@ -151,66 +174,100 @@ codeunit 50108 "MDC Dup. Reject Mgt."
             PayToVendorNo := Vendor."Pay-to Vendor No."
         else
             PayToVendorNo := Vendor."No.";
+        exit(true);
+    end;
 
+    /// <summary>
+    /// Maps a Continia document type onto the kind of purchase document to look for. Returns
+    /// false for types MON-113 does not cover.
+    /// </summary>
+    local procedure TryResolveDocumentKind(DocumentType: Integer; var IsCreditMemo: Boolean): Boolean
+    var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
+    begin
         // DELIBERATE DIVERGENCE FROM CONTINIA. Continia's case statement has no else arm, so
         // for Order, Receipt and " " it leaves the lookup unfiltered on document type. We exit
         // instead. Two reasons: MON-113 is scoped to invoices and credit memos only, and an
         // unfiltered type lookup is a false-positive source we would be choosing to inherit.
         // So: safer than Continia here, and different from Continia - both on purpose.
         // Invoice and Prepayment share one arm because Continia maps both to a posted Invoice.
+        // A Boolean collapses three accepted types into two states. That is truthful while
+        // Prepayment behaves exactly as Invoice in both lookups. If Prepayment ever needs to
+        // differ, this returns an enum instead of a Boolean - TreatsPrepaymentAsAnInvoice and
+        // IgnoresDocumentTypesOutsideInvoiceAndCreditMemo are what will catch that.
         case DocumentType of
             CDCTemplateFieldRule."Document Type"::Invoice,
             CDCTemplateFieldRule."Document Type"::Prepayment:
-                VendLedgEntry.SetRange("Document Type", VendLedgEntry."Document Type"::Invoice);
+                IsCreditMemo := false;
             CDCTemplateFieldRule."Document Type"::"Credit Memo":
-                VendLedgEntry.SetRange("Document Type", VendLedgEntry."Document Type"::"Credit Memo");
+                IsCreditMemo := true;
             else
                 exit(false);
         end;
+        exit(true);
+    end;
 
+    /// <summary>
+    /// The document number already sits on a posted entry for that vendor.
+    /// Mirrors the "if VendLedgEntry.FindFirst()" branch of Continia's check.
+    /// </summary>
+    local procedure HasPostedDuplicate(VendDocNo: Code[50]; IsCreditMemo: Boolean; PayToVendorNo: Code[20]; var Reason: Text[250]): Boolean
+    var
+        VendLedgEntry: Record "Vendor Ledger Entry";
+    begin
+        // Key5 is ("External Document No."), a real single-field index on the table. No key
+        // covers all three filters together, and the document number is much the most selective
+        // of them - "Vendor No." appears only alongside "Currency Code" in Key2 and Key3.
         VendLedgEntry.SetCurrentKey("External Document No.");
         VendLedgEntry.SetLoadFields("Entry No.");
+        if IsCreditMemo then
+            VendLedgEntry.SetRange("Document Type", VendLedgEntry."Document Type"::"Credit Memo")
+        else
+            VendLedgEntry.SetRange("Document Type", VendLedgEntry."Document Type"::Invoice);
         VendLedgEntry.SetRange("External Document No.", CopyStr(VendDocNo, 1, MaxStrLen(VendLedgEntry."External Document No.")));
         // Vendors number their own invoices, so the same document number turning up for two
         // different vendors is ordinary. Without this filter a legitimate invoice from one
         // vendor is auto-rejected because another vendor once used that number.
         VendLedgEntry.SetRange("Vendor No.", PayToVendorNo);
-        // Posted wins, and returns here. Everything below is Continia's else branch: the
-        // unposted lookup runs ONLY when the posted one missed. Written as an early exit rather
-        // than a nested else, but the property that matters is the same - a document colliding
-        // with both can never have its posted reason overwritten by the unposted one.
-        if VendLedgEntry.FindFirst() then begin
-            Reason := CopyStr(StrSubstNo(DuplicateOnPostedEntryMsg, VendDocNo, VendLedgEntry."Entry No."), 1, MaxStrLen(Reason));
-            exit(true);
-        end;
+        if not VendLedgEntry.FindFirst() then
+            exit(false);
 
-        // The document may not be posted yet, in which case nothing is in Vendor Ledger Entry
-        // and the collision is with an open purchase invoice. Note Continia filters
-        // "Purchase Header" on "Pay-to Vendor No." while filtering the ledger on "Vendor No.";
-        // both receive the same resolved vendor, so both get PayToVendorNo here.
-        // Continia also runs "if PurchHeader.SetCurrentKey(...) then;" first - a legacy NAV 7
-        // guard against a key that may not exist. Omitted: the key exists in BC 27.
+        Reason := CopyStr(StrSubstNo(DuplicateOnPostedEntryMsg, VendDocNo, VendLedgEntry."Entry No."), 1, MaxStrLen(Reason));
+        exit(true);
+    end;
+
+    /// <summary>
+    /// The document number already sits on an open purchase document for that vendor - nothing
+    /// is in Vendor Ledger Entry yet because it has not been posted.
+    /// Mirrors the else branch of Continia's check.
+    /// </summary>
+    local procedure HasUnpostedDuplicate(VendDocNo: Code[50]; IsCreditMemo: Boolean; PayToVendorNo: Code[20]; var Reason: Text[250]): Boolean
+    var
+        PurchaseHeader: Record "Purchase Header";
+    begin
+        // Key4 is ("Document Type", "Pay-to Vendor No."), covering two of the three filters
+        // below; the default primary key Key1 ("Document Type", "No.") covers one. Added on
+        // those merits - this is not Continia's legacy "if PurchHeader.SetCurrentKey(...) then;"
+        // line being restored. That statement is a NAV 7 guard against a key that might not
+        // exist, and its empty then does nothing; the key it names is simply the right one.
+        PurchaseHeader.SetCurrentKey("Document Type", "Pay-to Vendor No.");
         PurchaseHeader.SetLoadFields("No.");
+        // Note Continia filters "Purchase Header" on "Pay-to Vendor No." while filtering the
+        // ledger on "Vendor No."; both receive the same resolved vendor.
         // The vendor's own document number is not one field filtered two ways - it lives in a
-        // DIFFERENT FIELD per document type. So each arm sets two ranges, the type and the
-        // matching number field, exactly as Continia does.
-        // No else arm: an excluded document type cannot reach here, because the case above
-        // already exited for it. An "else exit(false)" would be unreachable. That is safe only
-        // while that first gate stands - if it ever stops exiting, this case needs an else.
-        case DocumentType of
-            CDCTemplateFieldRule."Document Type"::Invoice,
-            CDCTemplateFieldRule."Document Type"::Prepayment:
-                begin
-                    PurchaseHeader.SetRange("Document Type", PurchaseHeader."Document Type"::Invoice);
-                    PurchaseHeader.SetRange("Vendor Invoice No.", CopyStr(VendDocNo, 1, MaxStrLen(PurchaseHeader."Vendor Invoice No.")));
-                end;
-            CDCTemplateFieldRule."Document Type"::"Credit Memo":
-                begin
-                    PurchaseHeader.SetRange("Document Type", PurchaseHeader."Document Type"::"Credit Memo");
-                    PurchaseHeader.SetRange("Vendor Cr. Memo No.", CopyStr(VendDocNo, 1, MaxStrLen(PurchaseHeader."Vendor Cr. Memo No.")));
-                end;
+        // DIFFERENT FIELD per document type, which is why an invoice-only lookup cannot see
+        // credit memos at all. Each branch sets both the type and the matching number field.
+        if IsCreditMemo then begin
+            PurchaseHeader.SetRange("Document Type", PurchaseHeader."Document Type"::"Credit Memo");
+            PurchaseHeader.SetRange("Vendor Cr. Memo No.", CopyStr(VendDocNo, 1, MaxStrLen(PurchaseHeader."Vendor Cr. Memo No.")));
+        end else begin
+            PurchaseHeader.SetRange("Document Type", PurchaseHeader."Document Type"::Invoice);
+            PurchaseHeader.SetRange("Vendor Invoice No.", CopyStr(VendDocNo, 1, MaxStrLen(PurchaseHeader."Vendor Invoice No.")));
         end;
         PurchaseHeader.SetRange("Pay-to Vendor No.", PayToVendorNo);
+        // Reason is written only on the true path. This runs after the posted lookup, so
+        // writing it on a miss would clobber nothing today - but it would the moment the order
+        // changed, and three tests assert a false verdict leaves Reason blank.
         if not PurchaseHeader.FindFirst() then
             exit(false);
 
