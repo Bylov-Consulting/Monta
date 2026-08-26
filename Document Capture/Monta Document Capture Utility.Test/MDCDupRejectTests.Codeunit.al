@@ -7,7 +7,8 @@ codeunit 50400 "MDC Dup. Reject Tests"
                   tabledata "CDC Document Capture Setup" = imd,
                   tabledata "CDC Document Category" = imd,
                   tabledata Vendor = imd,
-                  tabledata "Vendor Ledger Entry" = imd;
+                  tabledata "Vendor Ledger Entry" = imd,
+                  tabledata "Purchase Header" = imd;
 
     var
         AnyLib: Codeunit Any;
@@ -37,6 +38,9 @@ codeunit 50400 "MDC Dup. Reject Tests"
         OrderTypeTok: Label 'Order', Locked = true;
         ReceiptTypeTok: Label 'Receipt', Locked = true;
         BlankTypeTok: Label 'blank', Locked = true;
+        NoUnpostedDuplicateErr: Label 'HasDuplicate did not report a duplicate although an unposted purchase invoice for the same vendor already carries that Vendor Invoice No. Nothing is in Vendor Ledger Entry yet, so only the unposted lookup can find it.';
+        UnpostedReasonBlankErr: Label 'HasDuplicate reported an unposted duplicate but left Reason blank. The reason is what tells a user where the collision is.';
+        UnpostedReasonSameAsPostedErr: Label 'HasDuplicate gave the unposted duplicate the same wording as a posted one. Telling a user the document sits on a posted vendor ledger entry is wrong when it is an open purchase invoice.';
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
     var
@@ -479,11 +483,53 @@ codeunit 50400 "MDC Dup. Reject Tests"
         AssertNotDuplicateForType(ExternalDocNo, CDCTemplateFieldRule."Document Type"::" ", VendorNo, BlankTypeTok);
     end;
 
+    [Test]
+    procedure RejectsWhenUnpostedInvoiceHasSameExtDocNo()
+    var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        UnpostedVendorNo: Code[20];
+        PostedVendorNo: Code[20];
+        UnpostedDocNo: Code[35];
+        PostedDocNo: Code[35];
+        UnpostedReason: Text[250];
+        PostedReason: Text[250];
+    begin
+        // [SCENARIO] MON-113 v2: Continia's SECOND check, and the half the ticket explicitly
+        // asks for - the collision is with an OPEN purchase invoice nobody has posted yet, so
+        // there is no Vendor Ledger Entry to find. Continia only reaches this check when the
+        // posted lookup misses, and so must we.
+        Initialize();
+
+        // [GIVEN] A vendor with an unposted purchase invoice carrying a Vendor Invoice No.,
+        // and deliberately NO posted entry - the posted lookup cannot be what answers this.
+        UnpostedVendorNo := CreateVendor();
+        UnpostedDocNo := AnyExternalDocNo();
+        CreateUnpostedInvoice(UnpostedVendorNo, UnpostedDocNo);
+
+        // [GIVEN] A separate vendor with a posted entry, to capture the posted wording
+        PostedVendorNo := CreateVendor();
+        PostedDocNo := AnyExternalDocNo();
+        CreatePostedInvoiceEntry(PostedVendorNo, PostedDocNo);
+        DupRejectMgt.HasDuplicate(PostedDocNo, CDCTemplateFieldRule."Document Type"::Invoice, PostedVendorNo, PostedReason);
+
+        // [WHEN] That same vendor document number arrives again as an invoice
+        // [THEN] It is a duplicate, and the reason says where it really is
+        Assert.IsTrue(
+            DupRejectMgt.HasDuplicate(UnpostedDocNo, CDCTemplateFieldRule."Document Type"::Invoice, UnpostedVendorNo, UnpostedReason),
+            NoUnpostedDuplicateErr);
+        Assert.AreNotEqual('', UnpostedReason, UnpostedReasonBlankErr);
+        // Compared against the posted wording rather than against a hardcoded string, so the
+        // test does not pin the Label text - only that the two paths cannot say the same thing.
+        Assert.AreNotEqual(PostedReason, UnpostedReason, UnpostedReasonSameAsPostedErr);
+    end;
+
     local procedure Initialize()
     begin
         AnyLib.SetDefaultSeed();
         ClearTestDocuments();
         ClearTestVendors();
+        ClearTestPurchaseHeaders();
     end;
 
     local procedure ClearTestDocuments()
@@ -569,6 +615,41 @@ codeunit 50400 "MDC Dup. Reject Tests"
         DuplicateFound := DupRejectMgt.HasDuplicate(ExternalDocNo, DocumentType, VendorNo, Reason);
         Assert.IsFalse(DuplicateFound, StrSubstNo(TypeLeakedErr, TypeName));
         Assert.AreEqual('', Reason, StrSubstNo(ReasonLeftForTypeErr, TypeName));
+    end;
+
+    local procedure ClearTestPurchaseHeaders()
+    var
+        PurchaseHeader: Record "Purchase Header";
+    begin
+        PurchaseHeader.SetFilter("No.", TestDocNoPrefixTok + '*');
+        PurchaseHeader.DeleteAll(false);
+    end;
+
+    // An open purchase invoice that has NOT been posted, so nothing exists in Vendor Ledger
+    // Entry. "Purchase Header" has an OnInsert trigger that pulls a number from No. Series, so
+    // "No." is set here and Insert(false) skips the trigger.
+    local procedure CreateUnpostedInvoice(PayToVendorNo: Code[20]; VendorInvoiceNo: Code[35])
+    var
+        PurchaseHeader: Record "Purchase Header";
+    begin
+        PurchaseHeader.Init();
+        PurchaseHeader."Document Type" := PurchaseHeader."Document Type"::Invoice;
+        PurchaseHeader."No." := AnyPurchaseHeaderNo();
+        PurchaseHeader."Buy-from Vendor No." := PayToVendorNo;
+        PurchaseHeader."Pay-to Vendor No." := PayToVendorNo;
+        PurchaseHeader."Vendor Invoice No." := VendorInvoiceNo;
+        PurchaseHeader.Insert(false);
+    end;
+
+    local procedure AnyPurchaseHeaderNo(): Code[20]
+    var
+        PurchaseHeader: Record "Purchase Header";
+        Candidate: Code[20];
+    begin
+        repeat
+            Candidate := CopyStr(TestDocNoPrefixTok + AnyLib.AlphanumericText(10), 1, MaxStrLen(Candidate));
+        until not PurchaseHeader.Get(PurchaseHeader."Document Type"::Invoice, Candidate);
+        exit(Candidate);
     end;
 
     // "Entry No." is not AutoIncrement on Vendor Ledger Entry - the poster assigns it.
