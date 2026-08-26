@@ -46,6 +46,8 @@ codeunit 50400 "MDC Dup. Reject Tests"
         CrMemoMatchedUnpostedInvoiceErr: Label 'HasDuplicate reported a duplicate although the only match is an unposted INVOICE and the incoming document is a CREDIT MEMO. They are not the same kind of document.';
         PayToVendorNotResolvedErr: Label 'HasDuplicate did not resolve the pay-to vendor. The sending vendor pays through another vendor, and that paying vendor already carries this document number.';
         PlainVendorLookupBrokenErr: Label 'HasDuplicate missed a duplicate for a vendor whose Pay-to Vendor No. is blank. Resolving pay-to must not break the ordinary case where the vendor pays for itself.';
+        BlankDocNoMatchedErr: Label 'HasDuplicate reported a duplicate for a document whose number was never captured. A blank number matches every posted entry that also has none, so this rejects the documents most likely to be incomplete.';
+        UnknownVendorMatchedErr: Label 'HasDuplicate reported a duplicate for a vendor number that does not exist. A missing vendor must exit, not fall through and look up the raw number.';
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
     var
@@ -653,6 +655,67 @@ codeunit 50400 "MDC Dup. Reject Tests"
             PlainVendorLookupBrokenErr);
     end;
 
+    [Test]
+    procedure IgnoresABlankDocumentNumber()
+    var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        VendorNo: Code[20];
+        Reason: Text[250];
+        DuplicateFound: Boolean;
+    begin
+        // [SCENARIO] MON-113 v2: Continia gates its whole check on VendDocNo <> ''. Without
+        // that guard a document whose number was never captured runs
+        // SetRange("External Document No.", ''), which MATCHES every posted entry that also has
+        // no external document number - and there are usually many. A mass false positive on
+        // exactly the documents most likely to be incomplete.
+        Initialize();
+
+        // [GIVEN] A vendor with a posted invoice that itself carries NO external document no.
+        // That blank entry is what makes this bite: without it the filter matches nothing and
+        // the test would pass for the wrong reason.
+        VendorNo := CreateVendor();
+        CreatePostedInvoiceEntry(VendorNo, '');
+
+        // [WHEN] A document arrives whose number was never captured
+        DuplicateFound := DupRejectMgt.HasDuplicate('', CDCTemplateFieldRule."Document Type"::Invoice, VendorNo, Reason);
+
+        // [THEN] It is not a duplicate, and no reason is left behind
+        Assert.IsFalse(DuplicateFound, BlankDocNoMatchedErr);
+        Assert.AreEqual('', Reason, ReasonNotBlankErr);
+    end;
+
+    [Test]
+    procedure IgnoresAVendorThatDoesNotExist()
+    var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        UnknownVendorNo: Code[20];
+        ExternalDocNo: Code[35];
+        Reason: Text[250];
+        DuplicateFound: Boolean;
+    begin
+        // [SCENARIO] MON-113 v2: HasDuplicate resolves the pay-to vendor, so it must survive a
+        // vendor number that no longer resolves. Two failure modes this pins:
+        // 1. An unguarded Vendor.Get THROWS. Once wired, that error escapes our subscriber and
+        //    kills Continia's whole validation - it would break OCR import, not just this doc.
+        // 2. Treating a missing vendor as "pays for itself" and looking up the raw number,
+        //    which is why the ledger entry below deliberately carries that very number.
+        Initialize();
+
+        // [GIVEN] A posted invoice filed under a vendor number that has no Vendor record
+        UnknownVendorNo := AnyUnknownVendorNo();
+        ExternalDocNo := AnyExternalDocNo();
+        CreatePostedInvoiceEntry(UnknownVendorNo, ExternalDocNo);
+
+        // [WHEN] A document arrives from that non-existent vendor with that same number
+        DuplicateFound := DupRejectMgt.HasDuplicate(ExternalDocNo, CDCTemplateFieldRule."Document Type"::Invoice, UnknownVendorNo, Reason);
+
+        // [THEN] It is not a duplicate, no reason is left behind, and nothing threw
+        Assert.IsFalse(DuplicateFound, UnknownVendorMatchedErr);
+        Assert.AreEqual('', Reason, ReasonNotBlankErr);
+    end;
+
     local procedure Initialize()
     begin
         AnyLib.SetDefaultSeed();
@@ -675,17 +738,17 @@ codeunit 50400 "MDC Dup. Reject Tests"
         Document.DeleteAll(false);
     end;
 
+    // Filters the ledger directly rather than looping vendors: IgnoresAVendorThatDoesNotExist
+    // leaves an entry whose "Vendor No." has no Vendor record, and a vendor-driven loop would
+    // never reach it.
     local procedure ClearTestVendors()
     var
         Vendor: Record Vendor;
         VendorLedgerEntry: Record "Vendor Ledger Entry";
     begin
+        VendorLedgerEntry.SetFilter("Vendor No.", TestDocNoPrefixTok + '*');
+        VendorLedgerEntry.DeleteAll(false);
         Vendor.SetFilter("No.", TestDocNoPrefixTok + '*');
-        if Vendor.FindSet() then
-            repeat
-                VendorLedgerEntry.SetRange("Vendor No.", Vendor."No.");
-                VendorLedgerEntry.DeleteAll(false);
-            until Vendor.Next() = 0;
         Vendor.DeleteAll(false);
     end;
 
@@ -925,6 +988,18 @@ codeunit 50400 "MDC Dup. Reject Tests"
         repeat
             Candidate := CopyStr(TestDocNoPrefixTok + AnyLib.AlphanumericText(10), 1, MaxStrLen(Candidate));
         until not Document.Get(Candidate);
+        exit(Candidate);
+    end;
+
+    // A vendor number that deliberately has NO Vendor record, for the missing-vendor path.
+    local procedure AnyUnknownVendorNo(): Code[20]
+    var
+        Vendor: Record Vendor;
+        Candidate: Code[20];
+    begin
+        repeat
+            Candidate := CopyStr(TestDocNoPrefixTok + AnyLib.AlphanumericText(10), 1, MaxStrLen(Candidate));
+        until not Vendor.Get(Candidate);
         exit(Candidate);
     end;
 
