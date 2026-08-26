@@ -41,6 +41,9 @@ codeunit 50400 "MDC Dup. Reject Tests"
         NoUnpostedDuplicateErr: Label 'HasDuplicate did not report a duplicate although an unposted purchase invoice for the same vendor already carries that Vendor Invoice No. Nothing is in Vendor Ledger Entry yet, so only the unposted lookup can find it.';
         UnpostedReasonBlankErr: Label 'HasDuplicate reported an unposted duplicate but left Reason blank. The reason is what tells a user where the collision is.';
         UnpostedReasonSameAsPostedErr: Label 'HasDuplicate gave the unposted duplicate the same wording as a posted one. Telling a user the document sits on a posted vendor ledger entry is wrong when it is an open purchase invoice.';
+        NoUnpostedCrMemoDuplicateErr: Label 'HasDuplicate did not report a duplicate although an unposted purchase credit memo for the same vendor already carries that Vendor Cr. Memo No.';
+        UnpostedCrMemoReasonBlankErr: Label 'HasDuplicate reported an unposted credit-memo duplicate but left Reason blank.';
+        CrMemoMatchedUnpostedInvoiceErr: Label 'HasDuplicate reported a duplicate although the only match is an unposted INVOICE and the incoming document is a CREDIT MEMO. They are not the same kind of document.';
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
     var
@@ -524,6 +527,69 @@ codeunit 50400 "MDC Dup. Reject Tests"
         Assert.AreNotEqual(PostedReason, UnpostedReason, UnpostedReasonSameAsPostedErr);
     end;
 
+    [Test]
+    procedure RejectsWhenUnpostedCreditMemoHasSameExtDocNo()
+    var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        VendorNo: Code[20];
+        VendorDocNo: Code[35];
+        Reason: Text[250];
+        DuplicateFound: Boolean;
+    begin
+        // [SCENARIO] MON-113 v2: the credit-memo half of the unposted check. Continia filters
+        // "Purchase Header" on "Vendor Cr. Memo No." for credit memos, a different field from
+        // the invoice branch, so an invoice-only lookup never sees them.
+        Initialize();
+
+        // [GIVEN] A vendor with an unposted CREDIT MEMO carrying a Vendor Cr. Memo No.,
+        // and no posted entry
+        VendorNo := CreateVendor();
+        VendorDocNo := AnyExternalDocNo();
+        CreateUnpostedCreditMemo(VendorNo, VendorDocNo);
+
+        // [WHEN] A CREDIT MEMO arrives from that vendor carrying the same document number
+        DuplicateFound := DupRejectMgt.HasDuplicate(VendorDocNo, CDCTemplateFieldRule."Document Type"::"Credit Memo", VendorNo, Reason);
+
+        // [THEN] It is a duplicate, and a reason is recorded
+        Assert.IsTrue(DuplicateFound, NoUnpostedCrMemoDuplicateErr);
+        Assert.AreNotEqual('', Reason, UnpostedCrMemoReasonBlankErr);
+    end;
+
+    [Test]
+    procedure IgnoresUnpostedInvoiceWhenDocumentIsCreditMemo()
+    var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        VendorNo: Code[20];
+        VendorDocNo: Code[35];
+        Reason: Text[250];
+        DuplicateFound: Boolean;
+    begin
+        // [SCENARIO] MON-113 v2: closes the transient defect left open by cycle 5. A credit
+        // memo passes the document-type gate, misses the ledger because that lookup correctly
+        // filters on posted credit memos, then falls into an unposted lookup that searches
+        // INVOICES - and matches. A legitimate credit memo auto-rejected because an unrelated
+        // invoice happens to share the number.
+        // This is the test that forces the credit-memo arm to be EXCLUSIVE rather than
+        // additive. RejectsWhenUnpostedCreditMemoHasSameExtDocNo alone could be satisfied by
+        // searching both document types indiscriminately.
+        Initialize();
+
+        // [GIVEN] A vendor with an unposted INVOICE carrying a Vendor Invoice No.,
+        // and no posted entry
+        VendorNo := CreateVendor();
+        VendorDocNo := AnyExternalDocNo();
+        CreateUnpostedInvoice(VendorNo, VendorDocNo);
+
+        // [WHEN] A CREDIT MEMO arrives from that vendor carrying the same document number
+        DuplicateFound := DupRejectMgt.HasDuplicate(VendorDocNo, CDCTemplateFieldRule."Document Type"::"Credit Memo", VendorNo, Reason);
+
+        // [THEN] It is not a duplicate, and no reason is left behind
+        Assert.IsFalse(DuplicateFound, CrMemoMatchedUnpostedInvoiceErr);
+        Assert.AreEqual('', Reason, ReasonNotBlankErr);
+    end;
+
     local procedure Initialize()
     begin
         AnyLib.SetDefaultSeed();
@@ -629,26 +695,44 @@ codeunit 50400 "MDC Dup. Reject Tests"
     // Entry. "Purchase Header" has an OnInsert trigger that pulls a number from No. Series, so
     // "No." is set here and Insert(false) skips the trigger.
     local procedure CreateUnpostedInvoice(PayToVendorNo: Code[20]; VendorInvoiceNo: Code[35])
+    begin
+        CreateUnpostedPurchaseDoc(PayToVendorNo, VendorInvoiceNo, "Purchase Document Type"::Invoice);
+    end;
+
+    local procedure CreateUnpostedCreditMemo(PayToVendorNo: Code[20]; VendorCrMemoNo: Code[35])
+    begin
+        CreateUnpostedPurchaseDoc(PayToVendorNo, VendorCrMemoNo, "Purchase Document Type"::"Credit Memo");
+    end;
+
+    // "Purchase Header"."Document Type" is an Enum, so the type is a real parameter here - same
+    // reasoning as CreatePostedEntry, no restating of member names.
+    // The vendor's own document number lives in a DIFFERENT FIELD per type, which is exactly
+    // the split Continia filters on: invoices use "Vendor Invoice No.", credit memos use
+    // "Vendor Cr. Memo No.".
+    local procedure CreateUnpostedPurchaseDoc(PayToVendorNo: Code[20]; VendorDocNo: Code[35]; DocumentType: Enum "Purchase Document Type")
     var
         PurchaseHeader: Record "Purchase Header";
     begin
         PurchaseHeader.Init();
-        PurchaseHeader."Document Type" := PurchaseHeader."Document Type"::Invoice;
-        PurchaseHeader."No." := AnyPurchaseHeaderNo();
+        PurchaseHeader."Document Type" := DocumentType;
+        PurchaseHeader."No." := AnyPurchaseHeaderNo(DocumentType);
         PurchaseHeader."Buy-from Vendor No." := PayToVendorNo;
         PurchaseHeader."Pay-to Vendor No." := PayToVendorNo;
-        PurchaseHeader."Vendor Invoice No." := VendorInvoiceNo;
+        if DocumentType = DocumentType::"Credit Memo" then
+            PurchaseHeader."Vendor Cr. Memo No." := VendorDocNo
+        else
+            PurchaseHeader."Vendor Invoice No." := VendorDocNo;
         PurchaseHeader.Insert(false);
     end;
 
-    local procedure AnyPurchaseHeaderNo(): Code[20]
+    local procedure AnyPurchaseHeaderNo(DocumentType: Enum "Purchase Document Type"): Code[20]
     var
         PurchaseHeader: Record "Purchase Header";
         Candidate: Code[20];
     begin
         repeat
             Candidate := CopyStr(TestDocNoPrefixTok + AnyLib.AlphanumericText(10), 1, MaxStrLen(Candidate));
-        until not PurchaseHeader.Get(PurchaseHeader."Document Type"::Invoice, Candidate);
+        until not PurchaseHeader.Get(DocumentType, Candidate);
         exit(Candidate);
     end;
 
