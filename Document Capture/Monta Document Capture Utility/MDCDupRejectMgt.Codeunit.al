@@ -2,7 +2,8 @@ codeunit 50108 "MDC Dup. Reject Mgt."
 {
     Access = Internal;
     Permissions = tabledata "CDC Document" = m,
-                  tabledata "Vendor Ledger Entry" = r;
+                  tabledata "Vendor Ledger Entry" = r,
+                  tabledata "Purchase Header" = r;
 
     /// <summary>
     /// Rejects a Document Capture document when Continia's own duplicate check has flagged it.
@@ -110,6 +111,7 @@ codeunit 50108 "MDC Dup. Reject Mgt."
     var
         CDCTemplateFieldRule: Record "CDC Template Field Rule";
         VendLedgEntry: Record "Vendor Ledger Entry";
+        PurchaseHeader: Record "Purchase Header";
     begin
         // Mirrors the posted-document half of the "CHECK EXTERNAL DOCUMENT NO." block in
         // Continia's codeunit 6085705 "CDC Purch. - Validation", read from the extracted
@@ -143,14 +145,34 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         // different vendors is ordinary. Without this filter a legitimate invoice from one
         // vendor is auto-rejected because another vendor once used that number.
         VendLedgEntry.SetRange("Vendor No.", SourceVendorNo);
-        if not VendLedgEntry.FindFirst() then
+        // Posted wins, and returns here. Everything below is Continia's else branch: the
+        // unposted lookup runs ONLY when the posted one missed. Written as an early exit rather
+        // than a nested else, but the property that matters is the same - a document colliding
+        // with both can never have its posted reason overwritten by the unposted one.
+        if VendLedgEntry.FindFirst() then begin
+            Reason := CopyStr(StrSubstNo(DuplicateOnPostedEntryMsg, VendDocNo, VendLedgEntry."Entry No."), 1, MaxStrLen(Reason));
+            exit(true);
+        end;
+
+        // The document may not be posted yet, in which case nothing is in Vendor Ledger Entry
+        // and the collision is with an open purchase invoice. Note Continia filters
+        // "Purchase Header" on "Pay-to Vendor No." while filtering the ledger on "Vendor No.";
+        // both receive the same resolved vendor, so both get SourceVendorNo here.
+        // Continia also runs "if PurchHeader.SetCurrentKey(...) then;" first - a legacy NAV 7
+        // guard against a key that may not exist. Omitted: the key exists in BC 27.
+        PurchaseHeader.SetLoadFields("No.");
+        PurchaseHeader.SetRange("Document Type", PurchaseHeader."Document Type"::Invoice);
+        PurchaseHeader.SetRange("Vendor Invoice No.", CopyStr(VendDocNo, 1, MaxStrLen(PurchaseHeader."Vendor Invoice No.")));
+        PurchaseHeader.SetRange("Pay-to Vendor No.", SourceVendorNo);
+        if not PurchaseHeader.FindFirst() then
             exit(false);
 
-        Reason := CopyStr(StrSubstNo(DuplicateOnPostedEntryMsg, VendDocNo, VendLedgEntry."Entry No."), 1, MaxStrLen(Reason));
+        Reason := CopyStr(StrSubstNo(DuplicateOnUnpostedDocMsg, VendDocNo, PurchaseHeader."No."), 1, MaxStrLen(Reason));
         exit(true);
     end;
 
     var
         DuplicateOnPostedEntryMsg: Label 'Document no. %1 already exists on posted vendor ledger entry %2.', Comment = '%1 = vendor document number, %2 = Vendor Ledger Entry No.';
+        DuplicateOnUnpostedDocMsg: Label 'Document no. %1 already exists on open purchase document %2, which has not been posted.', Comment = '%1 = vendor document number, %2 = Purchase Header No.';
         AutoRejectedTelemetryLbl: Label 'Monta Utility auto-rejected a Document Capture document flagged as a duplicate.', Locked = true;
 }
