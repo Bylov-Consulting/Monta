@@ -1,110 +1,143 @@
 # MON-113 — Auto-reject Document Capture documents on duplicate External Doc. No.
 
-Technical design. Target app: `Document Capture/Monta Document Capture Utility` (Bylov Consulting, id `2ce68cba-96aa-4f2b-80bd-502b16187a0f`), dependency Continia Document Capture 27.3.0.0.
+Technical design and build record. Target app: `Document Capture/Monta Document Capture Utility` (Bylov Consulting, id `2ce68cba-96aa-4f2b-80bd-502b16187a0f`), dependency Continia Document Capture 27.3.0.0.
 
-Everything under "Verified" was confirmed against the actual CDC 27.3.0.330595 symbol package — by `al_symbolsearch` and by compiling probe code with `al compile`. Everything under "Unverified" cannot be checked statically because the Continia app is an encrypted runtime package; the tests exist to settle those.
+**Status: built, 23 tests green, smoke-tested on `Sandbox__XML` and confirmed working.**
 
----
-
-## 1. What Continia already does
-
-Continia detects the collision and writes it as a **Message Center comment**, not as a field flag.
-
-**Verified:**
-
-- `Codeunit "CDC Message Center Setup Mgt."` exposes `ExternalDocumentNumberAlreadyExists(Document; Field; LineNo; Arg1..Arg4; var ErrorWasAdded)` (internal).
-- Its message text is `External Document No. %1 already exists (in %2, %3 = %4).` — four placeholders, matching the four Arg parameters.
-- Sibling messages in the same codeunit cover the rest of the ticket's "what counts as already exists" question:
-  - `%1 %2 already exists (on %3, %4 = %5).` — posted document
-  - `%1 %2 already exists (on unposted invoice %3).` / `(on unposted invoice %3 for %4 = %5).`
-  - `%1 %2 already exists (on unposted credit memo %3).` / `(on unposted credit memo %3 for %4 = %5).`
-  - `DocFoundOnDiffVendor(...)` — a **separate** message for the cross-vendor hit.
-- Every one of these lands in table `CDC Document Comment` via `AddMsgCenter(...; MsgCenterID: Code[50]; InfoAllowed; WarningAllowed; ErrorAllowed; var ErrorWasAdded)`.
-- `CDC Document Comment` carries: `Document No.`, `Field Code`, `Line No.`, `Area` (`Capture` | `Match` | `Validation`), `Comment Type` (`Information` | `Warning` | `Error`), `Comment: Text[250]`, **`Message Center ID: Code[50]`**.
-- Severity per message is customer configuration, held in table `CDC Msg. Center Setup Template`, keyed by `Message Center ID` + `Template No.` (the older `CDC Message Center Setup` table is marked removed as of tag 8.0 — do not use it).
-
-**This settles two of the ticket's open questions without any code:**
-
-| Open question | Answer |
-|---|---|
-| Match scope — same vendor only? | Continia's check is already vendor-aware. Same-vendor and cross-vendor are *different* Message Center IDs. Subscribe to the same-vendor one; add the cross-vendor one later if Monta wants it. No filtering logic of our own. |
-| What counts as "already exists"? | Continia already covers posted invoice, posted credit memo, unposted invoice, unposted credit memo. Which of them auto-reject is chosen by which Message Center IDs Monta configures — not by code. |
+This document was rewritten after the first sandbox test failed. The original design rested on a premise that turned out to be false, and the section below says so plainly rather than quietly presenting the corrected version as if it had always been the plan — because the mistake is the most useful thing in here for whoever maintains this next.
 
 ---
 
-## 2. The hook
+## 1. The mistake, and what it cost
 
-**`Codeunit "CDC Purch. - Validation"`, event `OnAfterValidateDocument(var Document: Record "CDC Document"; var IsInvalid: Boolean)`.**
+The original design detected duplicates by reading the **Message Center ID** on the `CDC Document Comment` that Continia writes when it finds a collision. That mechanism was designed, built, tested with seven RED/GREEN cycles, reviewed, merged into a green CI run — and did nothing at all in the sandbox.
 
-Verified: the codeunit exists, the event exists with that signature, and a subscriber to it compiles clean against DC 27.3.
+**Continia writes the comment we cared about with `DocumentComment.Add(...)`, which has no `MsgCenterID` parameter.** The row lands with a blank Message Center ID. No filter can match it.
 
-There is **no** dedicated Continia event fired when the duplicate is detected. `CDC Document Comment` publishes no `OnAfterAddMsgCenter`. So the pattern is: let validation finish, then read the comments it wrote.
+The message that *is* Message-Center-routed — `ExternalDocumentNumberAlreadyExists`, text `External Document No. %1 already exists (in %2, %3 = %4).` — genuinely exists in the symbols. It is simply not the message that fires for these documents. Symbol reading found a plausible candidate, and the design was written against it without confirming it was the one in play.
 
-Also verified as available on the `CDC Document` record, callable from our extension:
+Only a real import could have caught that. It is the reason the sandbox smoke test was a gate rather than a formality.
 
-- `procedure Reject()` — public, **but unusable here: it prompts.** See section 6.
-- `procedure HasWarningComments(): Boolean` — public
-- `Status` option members, in order: `Open`, `Registered`, `Rejected`
-- table event `OnAfterReject(var Document)`
-- `procedure Reopen()` is **internal** — users reopen from the CDC page action, we cannot call it
+### What the three checks actually are
 
-Other Continia details the build corrected, each found by running against DC 27.3 rather than by reading symbols:
+From `CDCPurchValidation.Codeunit.al`, the `CHECK EXTERNAL DOCUMENT NO.` block:
 
-- `CDC Document Comment."Entry No."` is **`AutoIncrement`**. Assigning it yourself fails at runtime.
-- `CDC Document Comment.Area` has **six** members — `Capture`, `Validation`, `Processing`, `Match`, `Import`, `Contracts`.
-- `"Comment Type"` is an **`Option`, not an `Enum`**, so it cannot be passed as a typed parameter without restating Continia's member list in our code. Read the members off a record variable instead.
-- `CDC Document Activity Log` is `Access = Internal`; declaring it as a `Record` fails with `AL0161`.
+| # | Checks against | How the comment is written | Message Center ID |
+|---|---|---|---|
+| 1 | `Vendor Ledger Entry` — posted | `DocumentComment.Add(...)` | **blank** |
+| 2 | `Purchase Header` — unposted invoice and credit memo | `DocumentComment.Add(...)` | **blank** |
+| 3 | Other open DC documents in the journal | `MessageCenterSetupMgt.DuplicateInvoiceInJournal(...)` | `C6085705_DUPLICATE_INV_JOURNAL` |
 
-Fallback hooks, both verified to compile, held in reserve for the risks in section 6:
+Case 3 is the only one with an ID — which is why the ID configured on the sandbox looked right and changed nothing. It identifies a different check.
 
-- `Database::"CDC Document Comment"`, `OnAfterInsertEvent`
-- `Codeunit "CDC Purch. - Full Capture"`, `OnAfterFullCapture(var Document)`
-- `Codeunit "CDC Document Importer"`, `OnCheckDocAutoReg(var Document; var Handle)`
+### Why not match the comment text
+
+It is the obvious fallback and it was rejected. The comment is built from a `Label`, so it is translated. A text filter works until someone runs BC in Danish, then silently stops — the same invisible failure, arriving later and harder to diagnose. **The feature must not depend on the user's language.**
+
+That constraint is what forces the current design.
 
 ---
 
-## 3. Design
+## 2. Design
 
-One subscriber, one management codeunit, four fields. No lookup against `Purch. Inv. Header` or `Purchase Header` — the ticket asks for reuse and a second implementation would drift from Continia's.
+Two independent detection paths, neither depending on comment text.
 
 ```
-Continia: capture -> validate -> writes CDC Document Comment (Msg Center ID)
+Continia: capture -> validate -> writes its comments, whatever they say
                                   |
-                                  v
               CDC Purch. - Validation :: OnAfterValidateDocument
                                   |
-                    MDC Dup. Reject Sub.  (subscriber, 3 lines)
+                    MDC Dup. Reject Sub.   (subscriber, one call)
                                   |
-                    MDC Dup. Reject Mgt.  (all logic, directly testable)
+                    MDC Dup. Reject Mgt.
                                   |
-   already auto-rejected? not Open? switch off? no ID? no matching comment? -> exit
+   already auto-rejected? not Open? no setup row? switch off?  -> exit
                                   |
-   one Modify(false): Status + Date-Time for Register/Reject
-                    + MDC Auto-Rejected + MDC Auto-Reject Reason
+                          FindDuplicate
+                          /              \
+              our own lookup          message centre comment
+        posted ledger entries,        another OPEN DC document
+        unposted invoices and         still in the journal
+        credit memos
+                          \              /
+                                  |
+   one Modify(false): Status + Date-Time + MDC Auto-Rejected + Reason
+                                  |
+                     telemetry MON-DC-0002
 ```
 
-**Not `Reject()`**, and no audit comment or telemetry — see sections 4 and 5.
+### Why our own lookup, when the ticket said not to duplicate
 
-### Objects — as built
+MON-113 says *"prefer extending Continia's existing validation over duplicating its duplicate-detection logic."* That is good advice and it is not achievable here: nothing language-independent identifies which comment Continia wrote. The duplication is forced by the language requirement, and its cost is real — if Continia changes those filters, ours will not follow.
 
-| Object | ID | Change |
+Three things limit the damage:
+
+- **The inputs are not re-derived.** `PurchDocMgt.GetDocumentNo()` and `GetDocumentType()` are Continia's own public API — the same accessors its check uses. Only the six `SetRange` calls are ours.
+- **Continia's check still runs.** We suppress nothing, so its comments still appear on the document card for anyone reading documents by hand.
+- **The mirrored source is pinned in a code comment** — `CDCPurchValidation.Codeunit.al`, DC 28.3.0.302359 — so the next person knows what to diff on a Continia upgrade. Filters verified identical across DC 26.2 and 28.3.
+
+### The hook
+
+`Codeunit "CDC Purch. - Validation"`, event `OnAfterValidateDocument(var Document; var IsValid: Boolean)`.
+
+Confirmed at source: the duplicate comment is written around line 155, the event fires at line 642 at the end of `Run`. The ordering assumption held.
+
+Two source facts worth keeping:
+
+- The publisher declares the parameter as `IsInvalid` but passes `IsValid`. The name is the opposite of the meaning. We ignore it; anyone who reads it should not.
+- Immediately after the event, Continia runs `if IsValid <> Rec.OK then begin Rec.OK := IsValid; Rec.Modify(); end;` on the **same record instance** we were handed, so our `Status` write is carried into that `Modify` rather than clobbered by it.
+
+### Guard chain
+
+Cheapest first. The two free document-property checks sit ahead of any database access.
+
+| # | Guard | Cost | Pinned by |
+|---|---|---|---|
+| 1 | `MDC Auto-Rejected` already true | free | `DoesNotRejectAgainAfterReopen` |
+| 2 | `Status <> Open` | free | `DoesNotRejectARegisteredDocument` |
+| 3 | setup row missing | 1 row | — |
+| 4 | switch off | same row | `DoesNothingWhenAutoRejectDisabled` |
+
+Then `FindDuplicate`, then one `Modify(false)` writing all four fields.
+
+### Inside `HasDuplicate`
+
+```
+blank document number      -> false
+resolve pay-to vendor      -> false if the vendor does not exist
+resolve document kind      -> false for Order, Receipt, blank
+posted lookup   (Vendor Ledger Entry)   -> true, with its reason
+unposted lookup (Purchase Header)       -> true, with its reason
+```
+
+Posted wins: the unposted lookup runs only when the posted one missed, so a document colliding with both is never reported against the open invoice when a posted one exists.
+
+### Three deliberate divergences from Continia
+
+Each is commented in the code as intentional, because "we mirror Continia" is a claim the next reader will rely on and it needs its exceptions listed.
+
+| Divergence | Why |
+|---|---|
+| `else exit(false)` on document type | Continia's `case` has no `else`, so `Order`, `Receipt` and blank leave its lookup **unfiltered on type**. MON-113 is scoped to invoices and credit memos, and an unfiltered type lookup is a false-positive source. |
+| Guarded `Vendor.Get` | Continia calls it unguarded from `OnRun`, where a missing vendor errors the whole validation. `HasDuplicate` returns a boolean and must not throw — an error escaping the subscriber would kill Continia's entire validation run. |
+| Omitted legacy `SetCurrentKey` | Continia's `if PurchHeader.SetCurrentKey(...) then;` is a NAV 7 guard for a key that exists in BC 27. Replaced with a plain `SetCurrentKey` on Key4, which covers two of three filters where the default covers one. |
+
+`FilterOnFiscalYear` is not replicated: it returns false unless localization is `'ES'`.
+
+---
+
+## 3. Objects and configuration
+
+| Object | ID | |
 |---|---|---|
-| `tableextension "MDC DC Setup Ext"` extends `CDC Document Capture Setup` | 50100 | **+2 fields** |
-| `pageextension "MDC DC Setup Card Ext"` | 50101 | **+2 fields** |
-| `tableextension "MDC CDC Document Ext"` extends `CDC Document` | 50105 | **new**, 2 fields |
-| `pageextension "MDC DC Document Card Ext"` extends `CDC Document Card` | 50106 | **new**, 2 read-only fields |
-| `codeunit "MDC Dup. Reject Sub."` | 50107 | **new**, subscriber only |
-| `codeunit "MDC Dup. Reject Mgt."` | 50108 | **new**, the logic |
+| `codeunit "MDC Dup. Reject Mgt."` | 50108 | the logic |
+| `codeunit "MDC Dup. Reject Sub."` | 50107 | subscriber, one call |
+| `tableextension "MDC CDC Document Ext"` | 50105 | `MDC Auto-Rejected`, `MDC Auto-Reject Reason` |
+| `pageextension "MDC DC Document Card Ext"` | 50106 | surfaces both, read-only |
+| `tableextension "MDC DC Setup Ext"` | 50100 | +2 setup fields |
+| `pageextension "MDC DC Setup Card Ext"` | 50101 | +2 setup fields |
 
-`MDC DC Setup Install` (50104) is **unchanged** — the new switch needs no install code, see section 4.
-
-All object names ≤ 30 chars (AL0305).
-
-### Object ID ranges — check these before adding an app
-
-The test app was first given 50200–50299, which **Monta Payment Reconciliation already owns**, and its test codeunit was 50200, the same ID as `codeunit 50200 "MON Pmt Recon Post"`. Both apps install into the same Monta tenant, so this would have failed at deploy with a duplicate object ID.
-
-**AL-Go compiles each project in isolation, so no compiler ever sees two apps at once** — a collision between sibling apps in one repo is invisible until both `.app` files reach the same tenant. CI cannot catch it as things stand. A CI step that unions the declared `idRanges` across every `app.json` and fails on overlap would catch the next one at PR time.
+Test app `Monta Document Capture Utility.Test` uses **50400–50499**. It originally claimed 50200–50299, which Monta Payment Reconciliation already owns — a collision that would have failed at deploy, not at build, because **AL-Go compiles each project in isolation and no compiler ever sees two apps at once**. A CI step unioning the declared `idRanges` across every `app.json` would catch the next one at PR time.
 
 | App | Range | Uses |
 |---|---|---|
@@ -113,157 +146,49 @@ The test app was first given 50200–50299, which **Monta Payment Reconciliation
 | Monta Payment Reconciliation | 50200–50299 | 50200–50207 |
 | Monta Payment Reconciliation.Test | 50300–50399 | 50300–50303 |
 
-### Fields
+### The two setup fields have different scopes
 
-On `CDC Document Capture Setup`:
-
-| Field | Type | Purpose |
+| Field | Gates | Default |
 |---|---|---|
-| `MDC Auto-Reject Duplicates` | Boolean | Master switch. Default **false** on install — this rejects documents without a human, so it is opt-in per company. |
-| `MDC Duplicate Msg. Center ID` | Code[50] | `TableRelation = "CDC Msg. Center Setup Template"."Message Center ID"` — verified to compile. Monta picks the entry from Continia's own list; nothing is hardcoded. |
+| **Auto-Reject Duplicate Documents** | **Everything.** Off means no detection at all. | off |
+| **Duplicate Message Center ID** | **The journal path only.** Blank disables journal detection; the vendor-invoice lookup runs regardless. | blank |
 
-On `CDC Document`:
+That second row changed in v2. Under the original design a blank ID disabled the whole feature. It now scopes one path.
 
-| Field | Type | Purpose |
-|---|---|---|
-| `MDC Auto-Rejected` | Boolean, Editable=false | Loop guard **and** audit marker. Survives Continia deleting comments on re-validation. |
-| `MDC Auto-Reject Reason` | Text[250], Editable=false | Copy of the Continia comment text. Satisfies acceptance criterion "the reason is discoverable afterwards". |
-
-### The subscriber (verified to compile, zero errors, zero warnings)
-
-```al
-[EventSubscriber(ObjectType::Codeunit, Codeunit::"CDC Purch. - Validation", 'OnAfterValidateDocument', '', false, false)]
-local procedure AutoRejectOnDuplicate(var Document: Record "CDC Document"; var IsInvalid: Boolean)
-var
-    DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
-begin
-    DupRejectMgt.RejectIfDuplicate(Document);
-end;
-```
-
-### Management codeunit API
-
-```al
-internal procedure RejectIfDuplicate(var Document: Record "CDC Document"): Boolean
-```
-
-One procedure. The design originally also listed `IsAutoRejectEnabled()` and `GetDuplicateMsgCenterID()`; both were built, then deleted once the setup read was collapsed into a single `Get()` and neither had a caller. Nothing in the suite reached them, so a bug in either would not have failed a test — untested surface that looks tested is worse than none.
-
-Guard order inside `RejectIfDuplicate`, cheapest first. The two free document-property checks sit ahead of the setup read, so a document that can never be auto-rejected costs zero database access:
-
-| # | Guard | Cost | Test that fails without it |
-|---|---|---|---|
-| 1 | `MDC Auto-Rejected` already true → exit | free | `DoesNotRejectAgainAfterReopen` |
-| 2 | `Status <> Status::Open` → exit | free | `DoesNotRejectARegisteredDocument` |
-| 3 | Setup row missing → exit | 1 row | — |
-| 4 | Switch off → exit | same row | `DoesNothingWhenAutoRejectDisabled` |
-| 5 | Message Center ID blank → exit | same row | — |
-| 6 | No comment matching document + ID + Warning/Error → exit | 1 `FindFirst` | `LeavesDocumentUntouchedWhenOtherMsgCenterID`, `IgnoresInformationSeverityComment` |
-
-Guard 2 is an **allow-list, not a deny-list**. With members `Open, Registered, Rejected`, blocking only `Registered` would still let an already-Rejected document be re-rejected and have its `Date-Time for Register/Reject` rewritten, and would silently admit any status Continia adds later.
-
-Then one `Modify(false)` writing `Status`, `Date-Time for Register/Reject`, `MDC Auto-Rejected` and `MDC Auto-Reject Reason`.
-
-**Not `Reject()`** — see section 6. The audit comment and telemetry described in the original design were not built; the two document fields plus the page extension cover the acceptance criterion, and a comment would be deleted by Continia on re-validation anyway.
-
-### Remaining ticket questions
-
-- **Which category?** The subscriber sits on the *purchase* validation codeunit, so it only fires for purchase categories. That is the stated assumption. Narrowing to one category code is one extra setup field and one extra guard — add it only if Lene names a code.
-- **Reversibility?** A user reopens from CDC's own Reopen action; `MDC Auto-Rejected` stays true so we never touch it again. The reason stays visible on the document card.
+No install code is needed: the switch has no `InitValue`, so it is false on a fresh company through `Init()` and false on an existing row because that is the column default. The neighbouring `Disable CDC Cross-Co. Tmpl.` field *does* need explicit handling in `EnsureSetupRecordOnInstall`, precisely because its desired default is `true` and `InitValue` does not backfill.
 
 ---
 
-## 4. Footprint
+## 4. Tests
 
-As built: two new codeunits (`MDC Dup. Reject Mgt.` 50108, `MDC Dup. Reject Sub.` 50107), one new tableextension (50105 on `CDC Document`), one new pageextension (50106 on `CDC Document Card`), two fields added to the existing setup tableextension and two to the existing setup page extension. **No install code** — see below. No new tables, no job queue entry, no scheduled task, no duplicate-detection logic of our own.
+**23 tests, all green, run in CI as well as locally.** Fifteen RED/GREEN cycles across two designs, plus two REFACTORs.
 
-Install needs nothing because `MDC Auto-Reject Duplicates` carries no `InitValue`, so it is false on a fresh company through `Init()` and false on an existing row because that is the column default. The neighbouring `Disable CDC Cross-Co. Tmpl.` field *does* need explicit handling in `EnsureSetupRecordOnInstall`, precisely because its desired default is `true` and `InitValue` does not backfill existing rows. Ours wants `false`, which is what it already is.
+The tests that carry the weight are the ones asserting something is **not** done. In every pair, the positive test would pass against an implementation that searches too broadly — and since we are now the authority rather than a reader of Continia's verdict, "too broad" means auto-rejecting legitimate invoices with no human in the loop.
 
----
+| Falsifier | What it prevents |
+|---|---|
+| `IgnoresPostedInvoiceForADifferentVendor` | Vendor A's invoice rejected because vendor B once used that number |
+| `IgnoresPostedCreditMemoWhenDocumentIsInvoice` | An invoice matched against a credit memo |
+| `IgnoresUnpostedInvoiceWhenDocumentIsCreditMemo` | A credit memo matched against an unrelated open invoice |
+| `IgnoresDocumentTypesOutsideInvoiceAndCreditMemo` | `Order` / `Receipt` / blank matched with no type filter |
+| `IgnoresABlankDocumentNumber` | Every uncaptured document matched against every entry with no external number |
+| `IgnoresAVendorThatDoesNotExist` | An error escaping the subscriber and killing Continia's whole validation run |
+| `PostedDuplicateWinsOverUnposted` | The reason pointing at an open invoice when a posted document exists |
+| `DoesNotRejectAgainAfterReopen` | A reopened false positive re-rejected forever |
+| `DoesNotRejectARegisteredDocument` | A document that already became a purchase invoice being rejected after the fact |
 
-## 5. TDD plan
-
-### Test project
-
-New folder `Document Capture/Monta Document Capture Utility.Test`, added to `testFolders` in `Document Capture/.AL-Go/settings.json` (currently `[]`). Codeunit `"MDC Dup. Reject Tests"` (21 chars).
-
-The tests drive `MDC Dup. Reject Mgt.` directly with `CDC Document` and `CDC Document Comment` rows inserted by the test, and never invoke Continia's capture or OCR pipeline. That keeps them runnable in a container without a Continia Online activation.
-
-**Do this before writing any test:** publish the eight Continia apps from `Document Capture/dependencies/` into a BC 27.3 container and confirm they install. If they refuse without a Continia license, the CLAUDE.md migration/legacy-dependency exception applies — the commit gate cannot be satisfied and this needs an unblock decision, not a workaround.
-
-### Cycles — as built
-
-Seven RED/GREEN pairs plus a REFACTOR, `bc-test` run fresh against container `bcmondc` at every commit. Each RED test is the cycle-1 test with **exactly one token changed**, so there is only one thing that can make it pass.
-
-| # | Test | RED → GREEN | bc-test |
-|---|---|---|---|
-| 1 | `AutoRejectsWhenDuplicateCommentPresent` — asserts Status only | `9ed621b` → `9696b9f` | 0/1 → 1/1 |
-| 2 | `LeavesDocumentUntouchedWhenOtherMsgCenterID` | `5b73f99` → `3518f03` | 1/2 → 2/2 |
-| 3 | `IgnoresInformationSeverityComment` | `b168f75` → `ea04852` | 2/3 → 3/3 |
-| 4 | `DoesNothingWhenAutoRejectDisabled` | `7a63867` → `751fc8a` | 3/4 → 4/4 |
-| 5 | `RecordsReasonWhenAutoRejecting` | `8a7a851` → `a7bcdd8` | 4/5 → 5/5 |
-| 6 | `DoesNotRejectAgainAfterReopen` | `ce1174d` → `eea95de` | 5/6 → 6/6 |
-| 7 | `DoesNotRejectARegisteredDocument` | `8fb06ae` → `da9550d` | 6/7 → 7/7 |
-| — | REFACTOR: one setup row read instead of two | `ea4a0ef` | 7/7 |
-| — | GREEN: subscriber, page extensions | `3c839b0` | 7/7 |
-
-Cycle 1's GREEN deliberately rejected on *any* comment. That is triangulation: it is what makes cycle 2 genuinely fail rather than pass on arrival.
-
-**Two changes from the plan above.** Cycle 7 (`DoesNotRejectARegisteredDocument`) was not in the original list — the `Status <> Open` guard was specified in section 3 and no cycle was scheduled for it, and no existing test could have caught the omission because every one of them builds an Open document. And `AutoRejectsWhenDuplicateCommentIsError` was dropped: after cycle 3 added the severity filter it would have passed on arrival, and the TDD gate rejects a green RED.
-
-The tests that make the suite prove rather than pass are 2, 3, 6 and 7 — the four that assert something is *not* done. Without them an implementation that rejects every document carrying any comment goes green on the rest.
-
-### Sandbox smoke test — required before merge
-
-The AL test harness bypasses the license layer and never exercises Continia's pipeline, so container-green is not evidence the feature works. On the Monta sandbox (tenant `8e9e7bfd-c925-4ae1-a1ca-20240f386627`):
-
-1. Open the Message Center Setup page, find the entry whose Comment (example) is `External Document No. %1 already exists (in %2, %3 = %4).`, note its Message Center ID, set it in DC setup and turn the switch on.
-2. Confirm the purchase category's template actually uses `CDC Purch. - Validation` as its validation codeunit.
-3. Import a document whose External Doc. No. matches a **posted** purchase invoice for the same vendor → arrives Rejected, reason visible.
-4. Same against an **open** purchase invoice.
-5. Import a non-duplicate → normal flow, untouched.
-6. Reopen an auto-rejected document → it stays Open through the next validation.
+Four tests pass on arrival and were verified by **mutation** rather than a fake RED — the guard was temporarily removed, the red captured, the guard restored, and the mutated state never committed. Notably, `IgnoresDocumentTypesOutsideInvoiceAndCreditMemo` guards a `case` with no `else`, for which **AL raises no warning at all**: removing our `else exit(false)` compiles clean and passes every analyzer. Only that test notices.
 
 ---
 
-## 6. The four assumptions — two settled, two still open
+## 5. Known limitations
 
-Continia ships as an encrypted runtime package, so its implementation cannot be read. Four things were assumed. Running the code settled two of them; the other two need the sandbox.
+**Continia's `OnAfterReject` never fires.** We write `Status` directly because `Reject()` raises a `Confirm` with no reachable suppression — under the job queue `GuiAllowed` is false, `Confirm` returns its default, and the rejection would silently not happen. A runtime diagnostic walked every comparable field before and after a real `Reject()` and found it changes exactly `Status` and `Date-Time for Register/Reject` — so the row is identical, but subscribers to `OnAfterReject` do not run. Measured: **nothing in the installed app set subscribes to it**, so this currently costs nothing. Re-check after adding Continia modules.
 
-### Settled — assumption 2 was wrong
+**`MDC Auto-Rejected` can never be cleared.** A document flagged during a misconfiguration is permanently exempt from future auto-rejection. Reopening works normally; the flag is what stops a reopened false positive being re-rejected. Accepted deliberately.
 
-**`Reject()` prompts.** It raises `Confirm Do you want to reject the document?` from `CDC Document` (table 6085590) line 7, and there is no reachable way to suppress it: `ResetSkipConfirmMsg()` is a reset, not a setter, and `CDC Template.SkipConfirm(Boolean)` is `internal` to Continia.
+**The reason may name an arbitrary match.** When a vendor has two or more open purchase documents of the same type carrying the same number, which one the reason names depends on key order. The verdict is unaffected. Making it deterministic is a product decision, not a refactor.
 
-This was never only a test problem. The feature runs inside document validation:
+**The setup field cannot be filled before Continia's "Create Default setup" has run**, because `TableRelation` blocks manual entry into an empty template table. Accepted.
 
-- **Job queue / OCR import**, the normal path — `GuiAllowed` is false, so `Confirm` returns its default and the rejection silently does not happen.
-- **Interactive** — a dialog appears in front of a user who took no action.
-
-Either way the feature would have looked correct in review and failed in production, on the path that matters, without an error. It only surfaced by running against the real engine; the call compiles fine.
-
-### Settled — assumption 3 holds, and is now measured
-
-Writing `Status` and `Date-Time for Register/Reject` directly is **equivalent** to `Reject()`, not an approximation. A throwaway diagnostic walked every comparable field of the `CDC Document` row with a `RecordRef` — a generic walk, not a guess list — before and after a real `Reject()` with a `ConfirmHandler`, and found exactly two changes:
-
-```
-Status:                        Open -> Rejected
-Date-Time for Register/Reject: <blank> -> now
-```
-
-No activity-log row, no comment, no `Document Status Text` refresh. `CDC Document Activity Log` and `CDC Document Comment` row counts were unchanged at 0 → 0. The diagnostic was deleted once read; the finding is recorded in a comment on the implementation.
-
-### Still open — the sandbox is the only place these can be answered
-
-1. **`ExternalDocumentNumberAlreadyExists` runs before `OnAfterValidateDocument` fires.** The entire design rests on this. If Continia writes the comment later, `FindFirst` finds nothing and the feature does nothing — indistinguishable from "no duplicate found". Fallback: latch the hit in a subscriber on `Database::"CDC Document Comment"` `OnAfterInsertEvent` and act in `OnAfterValidateDocument`. Both events compile.
-2. **The category's template uses `CDC Purch. - Validation`.** `CDC Template` carries a validation codeunit ID; if Monta's template points elsewhere the subscriber never fires. Step 2 of the smoke test checks this.
-
-Two more that the build added to the list:
-
-3. **`Modify(false)` inside the subscriber.** Every test calls `RejectIfDuplicate` directly. Under Continia's validation the record may be mid-transaction or held by the caller. Per the project's memory note, a licence error on `Modify` is fixed with `Permissions`, not a redesign.
-4. **The real Message Center ID.** Every test invents one. Nobody has yet confirmed the ID of Continia's actual duplicate message, or that it appears in the `CDC Msg. Center Setup Template` lookup the setup field relates to. The container's copy of that table is empty until Continia's "Create Default setup" action runs.
-
----
-
-## 7. Not doing
-
-No independent lookup against `Purch. Inv. Header` or `Purchase Header`. The ticket asks for reuse, and two implementations of the same rule will eventually disagree — at which point the DC document says one thing and the posting engine says another.
+**We are now the authority.** Previously the feature only acted on something Continia had already flagged. It now decides independently, so a divergence between our filters and Continia's would produce a rejection with no corresponding Continia comment. The falsifier tests exist for that reason.
