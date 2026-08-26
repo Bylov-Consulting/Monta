@@ -29,6 +29,8 @@ codeunit 50400 "MDC Dup. Reject Tests"
         NoDuplicateFoundErr: Label 'HasDuplicate did not report a duplicate although a posted invoice for the same vendor already carries that External Document No.';
         DuplicateAcrossVendorsErr: Label 'HasDuplicate reported a duplicate although the posted invoice belongs to a different vendor. A legitimate invoice would be auto-rejected with no user involved.';
         ReasonNotBlankErr: Label 'HasDuplicate returned false but left text in Reason. A false verdict must not leave a reason behind for a later cycle to write onto a document.';
+        DuplicateAcrossDocTypesErr: Label 'HasDuplicate reported a duplicate although the posted entry is a credit memo and the incoming document is an invoice. They are not the same kind of document.';
+        NoCreditMemoDuplicateErr: Label 'HasDuplicate did not report a duplicate although a posted credit memo for the same vendor already carries that External Document No.';
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
     var
@@ -360,6 +362,63 @@ codeunit 50400 "MDC Dup. Reject Tests"
         Assert.AreEqual('', Reason, ReasonNotBlankErr);
     end;
 
+    [Test]
+    procedure IgnoresPostedCreditMemoWhenDocumentIsInvoice()
+    var
+        TemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        VendorNo: Code[20];
+        ExternalDocNo: Code[35];
+        Reason: Text[250];
+        DuplicateFound: Boolean;
+    begin
+        // [SCENARIO] MON-113 v2: an invoice and a credit memo are not the same kind of
+        // document, so the same number appearing on both is not a duplicate. Continia splits
+        // on document type in both branches of its check and so must we.
+        // Without the type filter an incoming invoice matches a posted credit memo carrying
+        // that number for the same vendor - a false positive on an unrelated document.
+        Initialize();
+
+        // [GIVEN] A vendor with a posted CREDIT MEMO carrying an External Document No.
+        VendorNo := CreateVendor();
+        ExternalDocNo := AnyExternalDocNo();
+        CreatePostedCreditMemoEntry(VendorNo, ExternalDocNo);
+
+        // [WHEN] An INVOICE arrives from that vendor carrying the same document number
+        DuplicateFound := DupRejectMgt.HasDuplicate(ExternalDocNo, TemplateFieldRule."Document Type"::Invoice, VendorNo, Reason);
+
+        // [THEN] It is not a duplicate, and no reason is left behind
+        Assert.IsFalse(DuplicateFound, DuplicateAcrossDocTypesErr);
+        Assert.AreEqual('', Reason, ReasonNotBlankErr);
+    end;
+
+    [Test]
+    procedure RejectsWhenPostedCreditMemoHasSameExtDocNo()
+    var
+        TemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        VendorNo: Code[20];
+        ExternalDocNo: Code[35];
+        Reason: Text[250];
+    begin
+        // [SCENARIO] MON-113 v2: the credit-memo half of the same check. A credit memo whose
+        // number already sits on a posted credit memo for that vendor IS a duplicate.
+        // This is the guard against the type filter being written so tightly that credit memos
+        // stop being checked at all.
+        Initialize();
+
+        // [GIVEN] A vendor with a posted credit memo carrying an External Document No.
+        VendorNo := CreateVendor();
+        ExternalDocNo := AnyExternalDocNo();
+        CreatePostedCreditMemoEntry(VendorNo, ExternalDocNo);
+
+        // [WHEN] A CREDIT MEMO arrives from that vendor carrying the same document number
+        // [THEN] It is reported as a duplicate
+        Assert.IsTrue(
+            DupRejectMgt.HasDuplicate(ExternalDocNo, TemplateFieldRule."Document Type"::"Credit Memo", VendorNo, Reason),
+            NoCreditMemoDuplicateErr);
+    end;
+
     local procedure Initialize()
     begin
         AnyLib.SetDefaultSeed();
@@ -413,13 +472,25 @@ codeunit 50400 "MDC Dup. Reject Tests"
     // A posted invoice, as Continia's first check sees it: a Vendor Ledger Entry of type
     // Invoice carrying the External Document No. for that vendor.
     local procedure CreatePostedInvoiceEntry(VendorNo: Code[20]; ExternalDocNo: Code[35])
+    begin
+        CreatePostedEntry(VendorNo, ExternalDocNo, "Gen. Journal Document Type"::Invoice);
+    end;
+
+    local procedure CreatePostedCreditMemoEntry(VendorNo: Code[20]; ExternalDocNo: Code[35])
+    begin
+        CreatePostedEntry(VendorNo, ExternalDocNo, "Gen. Journal Document Type"::"Credit Memo");
+    end;
+
+    // "Vendor Ledger Entry"."Document Type" is an Enum, not an Option, so the type can be a
+    // real parameter here - no restating of member names, unlike AddComment's Option field.
+    local procedure CreatePostedEntry(VendorNo: Code[20]; ExternalDocNo: Code[35]; DocumentType: Enum "Gen. Journal Document Type")
     var
         VendorLedgerEntry: Record "Vendor Ledger Entry";
     begin
         VendorLedgerEntry.Init();
         VendorLedgerEntry."Entry No." := NextVendorLedgerEntryNo();
         VendorLedgerEntry."Vendor No." := VendorNo;
-        VendorLedgerEntry."Document Type" := VendorLedgerEntry."Document Type"::Invoice;
+        VendorLedgerEntry."Document Type" := DocumentType;
         VendorLedgerEntry."Document No." := CopyStr(TestDocNoPrefixTok + '-PPI', 1, MaxStrLen(VendorLedgerEntry."Document No."));
         VendorLedgerEntry."External Document No." := ExternalDocNo;
         VendorLedgerEntry."Posting Date" := WorkDate();
