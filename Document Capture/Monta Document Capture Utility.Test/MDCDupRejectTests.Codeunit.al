@@ -5,7 +5,9 @@ codeunit 50400 "MDC Dup. Reject Tests"
     Permissions = tabledata "CDC Document" = imd,
                   tabledata "CDC Document Comment" = imd,
                   tabledata "CDC Document Capture Setup" = imd,
-                  tabledata "CDC Document Category" = imd;
+                  tabledata "CDC Document Category" = imd,
+                  tabledata Vendor = imd,
+                  tabledata "Vendor Ledger Entry" = imd;
 
     var
         AnyLib: Codeunit Any;
@@ -24,6 +26,7 @@ codeunit 50400 "MDC Dup. Reject Tests"
         RejectedAfterReopenErr: Label 'A document already marked MDC Auto-Rejected was rejected again after a user reopened it. The user can never win.';
         RejectedRegisteredDocErr: Label 'A Registered document was rejected. It has already become a purchase invoice, so the two records would contradict each other.';
         RejectedOnBlankIDErr: Label 'A document was rejected while Duplicate Message Center ID is blank. Nothing identifies a duplicate, so nothing may be rejected.';
+        NoDuplicateFoundErr: Label 'HasDuplicate did not report a duplicate although a posted invoice for the same vendor already carries that External Document No.';
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
     var
@@ -294,10 +297,39 @@ codeunit 50400 "MDC Dup. Reject Tests"
         Assert.AreEqual(RereadDocument.Status::Open, RereadDocument.Status, RejectedOnBlankIDErr);
     end;
 
+    [Test]
+    procedure RejectsWhenPostedInvoiceHasSameExtDocNo()
+    var
+        TemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        VendorNo: Code[20];
+        ExternalDocNo: Code[35];
+        Reason: Text[250];
+    begin
+        // [SCENARIO] MON-113 v2: Continia records a duplicate as a comment with a BLANK
+        // Message Center ID, so nothing can filter on it and the comment text is a Label and
+        // therefore translated. We run the same lookup ourselves instead.
+        // This is Continia's first check in "CDC Purch. - Validation": the vendor document
+        // number already sits on a posted entry for the same pay-to vendor.
+        Initialize();
+
+        // [GIVEN] A vendor with a posted invoice carrying an External Document No.
+        VendorNo := CreateVendor();
+        ExternalDocNo := AnyExternalDocNo();
+        CreatePostedInvoiceEntry(VendorNo, ExternalDocNo);
+
+        // [WHEN] The same vendor document number arrives again as an invoice
+        // [THEN] It is reported as a duplicate
+        Assert.IsTrue(
+            DupRejectMgt.HasDuplicate(ExternalDocNo, TemplateFieldRule."Document Type"::Invoice, VendorNo, Reason),
+            NoDuplicateFoundErr);
+    end;
+
     local procedure Initialize()
     begin
         AnyLib.SetDefaultSeed();
         ClearTestDocuments();
+        ClearTestVendors();
     end;
 
     local procedure ClearTestDocuments()
@@ -312,6 +344,62 @@ codeunit 50400 "MDC Dup. Reject Tests"
                 DocumentComment.DeleteAll(false);
             until Document.Next() = 0;
         Document.DeleteAll(false);
+    end;
+
+    local procedure ClearTestVendors()
+    var
+        Vendor: Record Vendor;
+        VendorLedgerEntry: Record "Vendor Ledger Entry";
+    begin
+        Vendor.SetFilter("No.", TestDocNoPrefixTok + '*');
+        if Vendor.FindSet() then
+            repeat
+                VendorLedgerEntry.SetRange("Vendor No.", Vendor."No.");
+                VendorLedgerEntry.DeleteAll(false);
+            until Vendor.Next() = 0;
+        Vendor.DeleteAll(false);
+    end;
+
+    local procedure CreateVendor(): Code[20]
+    var
+        Vendor: Record Vendor;
+        Candidate: Code[20];
+    begin
+        repeat
+            Candidate := CopyStr(TestDocNoPrefixTok + AnyLib.AlphanumericText(10), 1, MaxStrLen(Candidate));
+        until not Vendor.Get(Candidate);
+        Vendor.Init();
+        Vendor."No." := Candidate;
+        Vendor.Name := Candidate;
+        Vendor.Insert(false);
+        exit(Candidate);
+    end;
+
+    // A posted invoice, as Continia's first check sees it: a Vendor Ledger Entry of type
+    // Invoice carrying the External Document No. for that vendor.
+    local procedure CreatePostedInvoiceEntry(VendorNo: Code[20]; ExternalDocNo: Code[35])
+    var
+        VendorLedgerEntry: Record "Vendor Ledger Entry";
+    begin
+        VendorLedgerEntry.Init();
+        VendorLedgerEntry."Entry No." := NextVendorLedgerEntryNo();
+        VendorLedgerEntry."Vendor No." := VendorNo;
+        VendorLedgerEntry."Document Type" := VendorLedgerEntry."Document Type"::Invoice;
+        VendorLedgerEntry."Document No." := CopyStr(TestDocNoPrefixTok + '-PPI', 1, MaxStrLen(VendorLedgerEntry."Document No."));
+        VendorLedgerEntry."External Document No." := ExternalDocNo;
+        VendorLedgerEntry."Posting Date" := WorkDate();
+        VendorLedgerEntry."Document Date" := WorkDate();
+        VendorLedgerEntry.Insert(false);
+    end;
+
+    // "Entry No." is not AutoIncrement on Vendor Ledger Entry - the poster assigns it.
+    local procedure NextVendorLedgerEntryNo(): Integer
+    var
+        VendorLedgerEntry: Record "Vendor Ledger Entry";
+    begin
+        if VendorLedgerEntry.FindLast() then
+            exit(VendorLedgerEntry."Entry No." + 1);
+        exit(1);
     end;
 
     local procedure SetupAutoReject(Enabled: Boolean; MsgCenterID: Code[50])
@@ -418,6 +506,14 @@ codeunit 50400 "MDC Dup. Reject Tests"
             Candidate := CopyStr(TestDocNoPrefixTok + AnyLib.AlphanumericText(10), 1, MaxStrLen(Candidate));
         until not Document.Get(Candidate);
         exit(Candidate);
+    end;
+
+    local procedure AnyExternalDocNo(): Code[35]
+    var
+        Result: Code[35];
+    begin
+        Result := CopyStr(TestDocNoPrefixTok + '-EXT-' + AnyLib.AlphanumericText(10), 1, MaxStrLen(Result));
+        exit(Result);
     end;
 
     local procedure AnyMsgCenterID(): Code[50]

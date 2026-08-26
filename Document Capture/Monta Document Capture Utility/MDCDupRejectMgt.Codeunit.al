@@ -98,6 +98,20 @@ codeunit 50108 "MDC Dup. Reject Mgt."
         exit(true);
     end;
 
+    /// <summary>
+    /// Decides whether a vendor document number already exists on a posted or unposted purchase
+    /// document for the same pay-to vendor. Mirrors the checks Continia's
+    /// "CDC Purch. - Validation" runs, because Continia records the hit as a comment with a
+    /// blank Message Center ID, which nothing can filter on.
+    /// Reason returns the text to store on the document when the answer is true.
+    /// </summary>
+    internal procedure HasDuplicate(VendDocNo: Code[50]; DocumentType: Integer; SourceVendorNo: Code[20]; var Reason: Text[250]): Boolean
+    begin
+        // Stub. No lookup yet - RejectsWhenPostedInvoiceHasSameExtDocNo is the RED that drives it.
+        Reason := '';
+        exit(false);
+    end;
+
     var
         AutoRejectedTelemetryLbl: Label 'Monta Utility auto-rejected a Document Capture document flagged as a duplicate.', Locked = true;
 }
