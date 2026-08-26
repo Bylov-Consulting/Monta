@@ -1,7 +1,8 @@
 codeunit 50108 "MDC Dup. Reject Mgt."
 {
     Access = Internal;
-    Permissions = tabledata "CDC Document" = m;
+    Permissions = tabledata "CDC Document" = m,
+                  tabledata "Vendor Ledger Entry" = r;
 
     /// <summary>
     /// Rejects a Document Capture document when Continia's own duplicate check has flagged it.
@@ -106,12 +107,29 @@ codeunit 50108 "MDC Dup. Reject Mgt."
     /// Reason returns the text to store on the document when the answer is true.
     /// </summary>
     internal procedure HasDuplicate(VendDocNo: Code[50]; DocumentType: Integer; SourceVendorNo: Code[20]; var Reason: Text[250]): Boolean
+    var
+        VendLedgEntry: Record "Vendor Ledger Entry";
     begin
-        // Stub. No lookup yet - RejectsWhenPostedInvoiceHasSameExtDocNo is the RED that drives it.
+        // Mirrors the posted-document half of the "CHECK EXTERNAL DOCUMENT NO." block in
+        // Continia's codeunit 6085705 "CDC Purch. - Validation", read from the extracted
+        // source of DC 28.3 (Monta's sandbox). The 26.2 copy has identical filters, so 27.3
+        // is the same. Diff against that block when upgrading Continia.
+        // We repeat the lookup instead of reading Continia's own verdict because Continia
+        // records it as a "CDC Document Comment" with a BLANK "Message Center ID" - nothing
+        // can filter on it - and the comment text is a Label, so it is translated.
         Reason := '';
-        exit(false);
+
+        VendLedgEntry.SetCurrentKey("External Document No.");
+        VendLedgEntry.SetLoadFields("Entry No.");
+        VendLedgEntry.SetRange("External Document No.", CopyStr(VendDocNo, 1, MaxStrLen(VendLedgEntry."External Document No.")));
+        if not VendLedgEntry.FindFirst() then
+            exit(false);
+
+        Reason := CopyStr(StrSubstNo(DuplicateOnPostedEntryMsg, VendDocNo, VendLedgEntry."Entry No."), 1, MaxStrLen(Reason));
+        exit(true);
     end;
 
     var
+        DuplicateOnPostedEntryMsg: Label 'Document no. %1 already exists on posted vendor ledger entry %2.', Comment = '%1 = vendor document number, %2 = Vendor Ledger Entry No.';
         AutoRejectedTelemetryLbl: Label 'Monta Utility auto-rejected a Document Capture document flagged as a duplicate.', Locked = true;
 }
