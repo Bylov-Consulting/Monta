@@ -31,6 +31,12 @@ codeunit 50400 "MDC Dup. Reject Tests"
         ReasonNotBlankErr: Label 'HasDuplicate returned false but left text in Reason. A false verdict must not leave a reason behind for a later cycle to write onto a document.';
         DuplicateAcrossDocTypesErr: Label 'HasDuplicate reported a duplicate although the posted entry is a credit memo and the incoming document is an invoice. They are not the same kind of document.';
         NoCreditMemoDuplicateErr: Label 'HasDuplicate did not report a duplicate although a posted credit memo for the same vendor already carries that External Document No.';
+        PrepaymentNotAnInvoiceErr: Label 'HasDuplicate did not treat Prepayment as an invoice. Continia maps Prepayment and Invoice onto the same posted document type.';
+        TypeLeakedErr: Label 'HasDuplicate reported a duplicate for document type %1, which is outside the invoice and credit-memo scope MON-113 covers.', Comment = '%1 = document type name';
+        ReasonLeftForTypeErr: Label 'HasDuplicate returned false for document type %1 but left text in Reason.', Comment = '%1 = document type name';
+        OrderTypeTok: Label 'Order', Locked = true;
+        ReceiptTypeTok: Label 'Receipt', Locked = true;
+        BlankTypeTok: Label 'blank', Locked = true;
     [Test]
     procedure AutoRejectsWhenDuplicateCommentPresent()
     var
@@ -419,6 +425,60 @@ codeunit 50400 "MDC Dup. Reject Tests"
             NoCreditMemoDuplicateErr);
     end;
 
+    [Test]
+    procedure TreatsPrepaymentAsAnInvoice()
+    var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        VendorNo: Code[20];
+        ExternalDocNo: Code[35];
+        Reason: Text[250];
+    begin
+        // [SCENARIO] MON-113 v2: Continia puts Prepayment and Invoice in one case arm, so a
+        // prepayment document is checked against posted INVOICE entries.
+        // This pins that mapping. Nothing else in the suite would notice if Prepayment were
+        // quietly dropped out of the arm and started being ignored.
+        Initialize();
+
+        // [GIVEN] A vendor with a posted invoice carrying an External Document No.
+        VendorNo := CreateVendor();
+        ExternalDocNo := AnyExternalDocNo();
+        CreatePostedInvoiceEntry(VendorNo, ExternalDocNo);
+
+        // [WHEN] A PREPAYMENT document arrives carrying that same document number
+        // [THEN] It is reported as a duplicate, exactly as an invoice would be
+        Assert.IsTrue(
+            DupRejectMgt.HasDuplicate(ExternalDocNo, CDCTemplateFieldRule."Document Type"::Prepayment, VendorNo, Reason),
+            PrepaymentNotAnInvoiceErr);
+    end;
+
+    [Test]
+    procedure IgnoresDocumentTypesOutsideInvoiceAndCreditMemo()
+    var
+        CDCTemplateFieldRule: Record "CDC Template Field Rule";
+        VendorNo: Code[20];
+        ExternalDocNo: Code[35];
+    begin
+        // [SCENARIO] MON-113 v2: this pins our DELIBERATE DIVERGENCE from Continia. Continia's
+        // case has no else arm, so Order, Receipt and " " leave its lookup unfiltered on type.
+        // We exit instead - MON-113 covers invoices and credit memos only, and an unfiltered
+        // type lookup is a false-positive source.
+        // If someone later "corrects" our else arm to match Continia's fall-through, the
+        // unfiltered lookup starts matching and this is the only test that would notice.
+        Initialize();
+
+        // [GIVEN] A vendor with a posted invoice carrying an External Document No.
+        VendorNo := CreateVendor();
+        ExternalDocNo := AnyExternalDocNo();
+        CreatePostedInvoiceEntry(VendorNo, ExternalDocNo);
+
+        // [WHEN] That same document number arrives under a type outside our scope
+        // [THEN] It is never a duplicate, and no reason is left behind
+        AssertNotDuplicateForType(ExternalDocNo, CDCTemplateFieldRule."Document Type"::"Order", VendorNo, OrderTypeTok);
+        AssertNotDuplicateForType(ExternalDocNo, CDCTemplateFieldRule."Document Type"::Receipt, VendorNo, ReceiptTypeTok);
+        AssertNotDuplicateForType(ExternalDocNo, CDCTemplateFieldRule."Document Type"::" ", VendorNo, BlankTypeTok);
+    end;
+
     local procedure Initialize()
     begin
         AnyLib.SetDefaultSeed();
@@ -496,6 +556,19 @@ codeunit 50400 "MDC Dup. Reject Tests"
         VendorLedgerEntry."Posting Date" := WorkDate();
         VendorLedgerEntry."Document Date" := WorkDate();
         VendorLedgerEntry.Insert(false);
+    end;
+
+    // One call plus both assertions, so a failure names which document type leaked instead of
+    // just saying "false expected".
+    local procedure AssertNotDuplicateForType(ExternalDocNo: Code[35]; DocumentType: Integer; VendorNo: Code[20]; TypeName: Text)
+    var
+        DupRejectMgt: Codeunit "MDC Dup. Reject Mgt.";
+        Reason: Text[250];
+        DuplicateFound: Boolean;
+    begin
+        DuplicateFound := DupRejectMgt.HasDuplicate(ExternalDocNo, DocumentType, VendorNo, Reason);
+        Assert.IsFalse(DuplicateFound, StrSubstNo(TypeLeakedErr, TypeName));
+        Assert.AreEqual('', Reason, StrSubstNo(ReasonLeftForTypeErr, TypeName));
     end;
 
     // "Entry No." is not AutoIncrement on Vendor Ledger Entry - the poster assigns it.
