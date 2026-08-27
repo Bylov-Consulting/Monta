@@ -151,6 +151,84 @@ codeunit 50300 "MON Pmt Recon Post Tests"
         Assert.ExpectedError('does not belong to customer');
     end;
 
+    [Test]
+    procedure PostsForeignCurrencyPaymentToForeignCurrencyBank()
+    var
+        Customer: Record Customer;
+        Item: Record Item;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        SalesHeader: Record "Sales Header";
+        SalesLine: Record "Sales Line";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
+        PmtReconPost: Codeunit "MON Pmt Recon Post";
+        CurrencyCode: Code[10];
+        PostedInvoiceNo: Code[20];
+        AppliedCustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        ResultEntryNo: Integer;
+    begin
+        // [SCENARIO] A payment received into a FOREIGN-currency bank account (currency <> LCY), settling a
+        // foreign-currency invoice, must post cleanly. Regression guard: the poster used to leave the
+        // customer/write-off legs in LCY while the bank leg took the bank account's currency, so for a
+        // foreign-currency bank the legs converted to different LCY amounts and the whole document failed
+        // the G/L Entry consistency check ("...will cause inconsistencies in the G/L Entry table"). Every
+        // leg must now carry the receipt currency so the balanced document's LCY conversion nets to zero.
+
+        // [GIVEN] A currency with a non-unity exchange rate (so the transaction currency <> LCY).
+        CurrencyCode := LibraryERM.CreateCurrencyWithRandomExchRates();
+
+        // [GIVEN] A customer in that currency with a posted invoice denominated in it.
+        LibrarySales.CreateCustomer(Customer);
+        Customer.Validate("Currency Code", CurrencyCode);
+        Customer.Modify(true);
+        LibraryInventory.CreateItem(Item);
+        LibrarySales.CreateSalesHeader(SalesHeader, SalesHeader."Document Type"::Invoice, Customer."No.");
+        LibrarySales.CreateSalesLine(SalesLine, SalesHeader, SalesLine.Type::Item, Item."No.", 1);
+        SalesLine.Validate("Unit Price", LibraryRandom.RandDecInRange(100, 1000, 2));
+        SalesLine.Modify(true);
+        PostedInvoiceNo := LibrarySales.PostSalesDocument(SalesHeader, true, true);
+
+        CustLedgerEntry.SetRange("Document Type", CustLedgerEntry."Document Type"::Invoice);
+        CustLedgerEntry.SetRange("Document No.", PostedInvoiceNo);
+        CustLedgerEntry.FindFirst();
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        AppliedCustLedgerEntryNo := CustLedgerEntry."Entry No.";
+        InvoiceAmount := CustLedgerEntry."Remaining Amount";
+
+        // [GIVEN] A bank account in the SAME foreign currency the receipt lands in.
+        LibraryERM.CreateBankAccount(BankAccount);
+        BankAccount.Validate("Currency Code", CurrencyCode);
+        BankAccount.Modify(true);
+        LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+        CreateGenJnlBatchWithSeries(GenJournalBatch, GenJournalTemplate.Name);
+
+        // [WHEN] The agent posts the foreign-currency payment to the foreign-currency bank account.
+        ResultEntryNo := PmtReconPost.PostCustomerPaymentToBank(
+            Customer."No.", BankAccount."No.", InvoiceAmount, AppliedCustLedgerEntryNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+
+        // [THEN] Posting succeeds (no consistency error): a bank entry exists, in the bank's currency,
+        // for the payment amount, left open.
+        Assert.AreNotEqual(0, ResultEntryNo, 'Posting must return a non-zero Bank Account Ledger Entry No.');
+        BankAccLedgerEntry.Get(ResultEntryNo);
+        Assert.AreEqual(
+            CurrencyCode, BankAccLedgerEntry."Currency Code",
+            'The Bank Account Ledger Entry must carry the foreign receipt currency.');
+        Assert.AreEqual(
+            InvoiceAmount, Abs(BankAccLedgerEntry.Amount),
+            'The Bank Account Ledger Entry amount must equal the posted payment amount (in currency).');
+        Assert.IsTrue(BankAccLedgerEntry.Open, 'The Bank Account Ledger Entry must remain open.');
+
+        // [THEN] The applied invoice is fully closed.
+        CustLedgerEntry.Get(AppliedCustLedgerEntryNo);
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        Assert.AreEqual(0, CustLedgerEntry."Remaining Amount", 'The applied invoice must be fully paid.');
+        Assert.IsFalse(CustLedgerEntry.Open, 'The applied invoice must be closed after the payment is applied.');
+    end;
+
     local procedure CreateCustomerWithPostedInvoice(var Customer: Record Customer; var CustLedgerEntryNo: Integer; var InvoiceAmount: Decimal)
     var
         Item: Record Item;
