@@ -2,7 +2,7 @@
   "id": "71bdfc54-6225-46be-b3e5-ecc51207292c",
   "name": "Monta Payment Reconciliation.Test",
   "publisher": "Bylov Consulting",
-  "version": "1.1.0.0",
+  "version": "1.2.0.0",
   "brief": "",
   "description": "Test app for Monta Payment Reconciliation.",
   "privacyStatement": "",
@@ -15,7 +15,7 @@
       "id": "2876b48f-4f0d-4b1f-806a-44ea446ab9b5",
       "name": "Monta Payment Reconciliation",
       "publisher": "Bylov Consulting",
-      "version": "1.1.0.0"
+      "version": "1.2.0.0"
     },
     {
       "id": "23de40a6-dfe8-4f80-80db-d70f83ce8caf",
