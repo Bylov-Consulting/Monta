@@ -117,6 +117,7 @@ codeunit 50200 "MON Pmt Recon Post"
         GenJournalTemplate: Record "Gen. Journal Template";
         GenJournalBatch: Record "Gen. Journal Batch";
         GenJournalLine: Record "Gen. Journal Line";
+        BankAccount: Record "Bank Account";
         BankAccountLedgerEntry: Record "Bank Account Ledger Entry";
         GenJnlPostLine: Codeunit "Gen. Jnl.-Post Line";
         ErrInfo: ErrorInfo;
@@ -126,6 +127,7 @@ codeunit 50200 "MON Pmt Recon Post"
         CustomerTotal: Decimal;
         DocumentNo: Code[20];
         AppliesToID: Code[50];
+        PaymentCurrencyCode: Code[10];
         LineNo: Integer;
         CustomerSeq: Integer;
         LastBankEntryNo: Integer;
@@ -136,6 +138,17 @@ codeunit 50200 "MON Pmt Recon Post"
         GenJournalTemplate.Get(GenJnlTemplateName);
         GenJournalBatch.SetLoadFields("No. Series");
         GenJournalBatch.Get(GenJnlTemplateName, GenJnlBatchName);
+
+        // The receipt is denominated in the bank account's currency. EVERY line of the document must carry
+        // that SAME currency, so the whole balanced document posts in one currency and its LCY conversion
+        // nets to zero. Otherwise the customer/write-off legs default to LCY while the bank line (whose
+        // Account No. validation copies the bank's currency) posts in the bank's currency: for a foreign-
+        // currency bank account the legs then convert to DIFFERENT LCY amounts and the transaction fails the
+        // G/L Entry consistency check ("...will cause inconsistencies in the G/L Entry table"). For an LCY
+        // bank account this is blank and every line stays in LCY exactly as before.
+        BankAccount.SetLoadFields("Currency Code");
+        BankAccount.Get(BankAccountNo);
+        PaymentCurrencyCode := BankAccount."Currency Code";
 
         // One Document No. for the whole balanced payment document. The bank (cash) line is the customer
         // applies LESS the write-offs: write-offs settle invoice value against a G/L account, never the
@@ -194,6 +207,9 @@ codeunit 50200 "MON Pmt Recon Post"
             GenJournalLine.Validate("Document No.", DocumentNo);
             GenJournalLine.Validate("Account Type", GenJournalLine."Account Type"::Customer);
             GenJournalLine.Validate("Account No.", TempApplyBuffer."Customer No.");
+            // After Account No. so the customer-account validation cannot reset it; before Amount so the
+            // amount is interpreted in — and its LCY value computed from — the receipt currency.
+            GenJournalLine.Validate("Currency Code", PaymentCurrencyCode);
             GenJournalLine.Validate(Amount, -CustomerTotal);
             if ExternalDocumentNo <> '' then
                 GenJournalLine.Validate("External Document No.", ExternalDocumentNo);
@@ -223,6 +239,9 @@ codeunit 50200 "MON Pmt Recon Post"
                 GenJournalLine.Validate("Document No.", DocumentNo);
                 GenJournalLine.Validate("Account Type", GenJournalLine."Account Type"::"G/L Account");
                 GenJournalLine.Validate("Account No.", TempApplyBuffer."G/L Account No.");
+                // Same receipt currency as every other leg (see the customer line) so the balanced document
+                // posts in one currency and its LCY conversion nets to zero.
+                GenJournalLine.Validate("Currency Code", PaymentCurrencyCode);
                 GenJournalLine.Validate(Amount, TempApplyBuffer."Amount to Apply");
                 if ExternalDocumentNo <> '' then
                     GenJournalLine.Validate("External Document No.", ExternalDocumentNo);
@@ -243,6 +262,9 @@ codeunit 50200 "MON Pmt Recon Post"
         GenJournalLine.Validate("Document No.", DocumentNo);
         GenJournalLine.Validate("Account Type", GenJournalLine."Account Type"::"Bank Account");
         GenJournalLine.Validate("Account No.", BankAccountNo);
+        // Validating the bank Account No. already copied the bank's currency; re-validating to the same
+        // PaymentCurrencyCode is a harmless no-op that keeps every leg's currency explicit and identical.
+        GenJournalLine.Validate("Currency Code", PaymentCurrencyCode);
         GenJournalLine.Validate(Amount, BankAmount);
         if ExternalDocumentNo <> '' then
             GenJournalLine.Validate("External Document No.", ExternalDocumentNo);
