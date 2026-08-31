@@ -175,10 +175,15 @@ codeunit 50300 "MON Pmt Recon Post Tests"
         CreateCustomerWithPostedInvoice(Customer, CustLedgerEntryNo, InvoiceAmount);
         CreatePaymentInfrastructure(BankAccount, GenJournalTemplate, GenJournalBatch);
 
-        // [GIVEN] Another, unposted application already reserves that invoice entry
+        // [GIVEN] Another, unposted application already reserves that invoice entry. Committed on purpose:
+        // the asserterror below rolls the database back to the last commit, so an uncommitted reservation
+        // would be undone by the rollback itself and the "reservation survived" assertion could never
+        // distinguish that from the poster having cleared it. (The invoice is already committed — the
+        // sales-posting library commits — which is why it survives the same rollback.)
         CustLedgerEntry.Get(CustLedgerEntryNo);
         CustLedgerEntry."Applies-to ID" := 'STAGED-JNL-LINE';
         CustEntryEdit.Run(CustLedgerEntry);
+        Commit();
 
         // [WHEN] The agent posts a payment against that reserved entry
         asserterror PmtReconPost.PostCustomerPaymentToBank(
