@@ -618,6 +618,125 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
     end;
 
     [Test]
+    procedure PostAndReconcile_NetsOpenCreditAgainstInvoice()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        BankAccReconLine: Record "Bank Acc. Reconciliation Line";
+        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Response: JsonObject;
+        InvoiceCustLedgerEntryNo: Integer;
+        CreditCustLedgerEntryNo: Integer;
+        InvoiceRemaining: Decimal;
+        CreditRemaining: Decimal;
+        NetAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+        ResultBankEntryNo: Integer;
+    begin
+        // [SCENARIO] A customer's open entries include a CREDIT (credit memo / payment on account) alongside
+        // the invoice, and the bank received only the NET. The correct application set settles both in one
+        // receipt: +InvoiceRemaining against the invoice and the NEGATIVE credit against the credit memo,
+        // netting to the cash actually received. Every appliesTo amount used to be forced > 0, so the whole
+        // set was rejected before anything posted; the amounts are now SIGNED, and the customer leg posts
+        // the net. This is the exact shape that failed in production (invoice + small credit on one
+        // document, bank line = invoice - credit).
+
+        // [GIVEN] One customer with a posted invoice and a SMALLER posted credit memo, both open. The
+        // credit memo's remaining amount is NEGATIVE — the sign the appliesTo amount must carry.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(600, 1000, 2), InvoiceCustLedgerEntryNo, InvoiceRemaining);
+        CreatePostedCreditMemoForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(10, 50, 2), CreditCustLedgerEntryNo, CreditRemaining);
+        NetAmount := InvoiceRemaining + CreditRemaining; // CreditRemaining < 0 -> the net is the cash received
+
+        // [GIVEN] Sanity: the credit really is a credit (negative remaining) and is smaller than the
+        // invoice, so the receipt nets to a positive amount that is strictly less than the invoice —
+        // making a "debits only" regression (posting InvoiceRemaining) observable.
+        Assert.IsTrue(
+            CreditRemaining < 0,
+            'Precondition: the posted credit memo must leave a NEGATIVE open remaining amount.');
+        Assert.IsTrue(
+            NetAmount > 0,
+            'Precondition: the invoice must exceed the credit so the receipt nets to positive cash.');
+
+        // [GIVEN] A bank account, journal template + batch, and ONE unmatched reconciliation line whose
+        // Statement Amount is the NET — the amount the bank actually received.
+        ArrangeBankJournalRecon(
+            BankAccount, GenJournalTemplate, GenJournalBatch, NetAmount, StatementNo, StatementLineNo);
+
+        // [WHEN] The agent issues one PostAndReconcile whose payments[0].appliesTo carries BOTH entries,
+        // the NEGATIVE credit FIRST — the ordering the allocator produces, so a first-element or
+        // sign-of-appliesTo[0] regression is caught here too.
+        Request := BuildMultiInvoiceRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer."No.",
+            CreditCustLedgerEntryNo, CreditRemaining,
+            InvoiceCustLedgerEntryNo, InvoiceRemaining);
+        Response := PmtReconService.PostAndReconcile(Request);
+        ResultBankEntryNo := ReadInt(Response, 'bankAccountLedgerEntryNo');
+
+        // [THEN] ONE bank entry for the NET cash — not the invoice total, and not the gross of both legs.
+        Assert.AreNotEqual(
+            0, ResultBankEntryNo,
+            'PostAndReconcile must return a non-zero Bank Account Ledger Entry No. for the netted receipt.');
+        Assert.IsTrue(
+            BankAccLedgerEntry.Get(ResultBankEntryNo),
+            'A Bank Account Ledger Entry with the returned No. must exist (the payment must have posted).');
+        Assert.AreEqual(
+            NetAmount, Abs(BankAccLedgerEntry.Amount),
+            'The bank receipt must equal the NET of the invoice and the credit, not the invoice alone.');
+        Assert.IsTrue(
+            BankAccLedgerEntry.Open,
+            'The Bank Account Ledger Entry must remain open (matched, not yet statement-posted).');
+
+        // [THEN] BOTH entries are closed: the payment plus the credit memo together settle the invoice.
+        CustLedgerEntry.Get(InvoiceCustLedgerEntryNo);
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        Assert.AreEqual(
+            0, CustLedgerEntry."Remaining Amount",
+            'The invoice must be fully settled (Remaining Amount = 0) by the payment plus the credit.');
+        Assert.IsFalse(
+            CustLedgerEntry.Open,
+            'The invoice must be closed (Open = false) after the netting call.');
+
+        CustLedgerEntry.Get(CreditCustLedgerEntryNo);
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        Assert.AreEqual(
+            0, CustLedgerEntry."Remaining Amount",
+            'The credit memo must be fully consumed (Remaining Amount = 0) by the netting.');
+        Assert.IsFalse(
+            CustLedgerEntry.Open,
+            'The credit memo must be closed (Open = false) after the netting call.');
+
+        // [THEN] The reconciliation line is fully matched 1:1 to that single netted receipt.
+        BankAccReconLine.Get(
+            BankAccReconLine."Statement Type"::"Bank Reconciliation",
+            BankAccount."No.", StatementNo, StatementLineNo);
+        Assert.AreEqual(
+            1, BankAccReconLine."Applied Entries",
+            'The reconciliation line must have exactly one applied bank ledger entry (1:1 with the receipt).');
+        Assert.AreEqual(
+            NetAmount, BankAccReconLine."Applied Amount",
+            'The applied amount must equal the NET statement amount.');
+        Assert.AreEqual(
+            0, BankAccReconLine.Difference,
+            'The reconciliation line difference must be zero once the netted receipt is matched.');
+
+        // [THEN] The response explicitly reports the line as matched.
+        Assert.IsTrue(
+            ReadBool(Response, 'reconciliationLineMatched'),
+            'PostAndReconcile must report reconciliationLineMatched = true once the line is matched.');
+    end;
+
+    [Test]
     procedure PostAndReconcile_MultiCustomer()
     var
         Customer1: Record Customer;
@@ -1658,6 +1777,94 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
         Assert.ExpectedError('must be less than the total applied');
     end;
 
+    [Test]
+    procedure PostAndReconcile_RejectsNonPositiveCustomerNet()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        InvoiceCustLedgerEntryNo: Integer;
+        CreditCustLedgerEntryNo: Integer;
+        InvoiceRemaining: Decimal;
+        CreditRemaining: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+    begin
+        // [SCENARIO] Signed appliesTo amounts make netting possible — and make it possible to submit a set
+        // that nets to ZERO or NEGATIVE. That customer's payment line would then be empty, or a customer
+        // DEBIT (a refund), which is not an incoming receipt. The set must be rejected up front, naming the
+        // customer and the offending net, rather than reaching the posting engine as an opaque failure.
+
+        // [GIVEN] One customer whose open CREDIT memo EXCEEDS its open invoice: applying both in full nets
+        // to a negative amount, so no cash could have been received.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 200, 2), InvoiceCustLedgerEntryNo, InvoiceRemaining);
+        CreatePostedCreditMemoForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(400, 600, 2), CreditCustLedgerEntryNo, CreditRemaining);
+        Assert.IsTrue(
+            InvoiceRemaining + CreditRemaining < 0,
+            'Precondition: the credit must exceed the invoice so the applications net to a negative amount.');
+
+        // [GIVEN] Valid bank / journal / recon scaffolding, so the ONLY defect is the non-positive net.
+        ArrangeBankJournalRecon(
+            BankAccount, GenJournalTemplate, GenJournalBatch, InvoiceRemaining, StatementNo, StatementLineNo);
+
+        // [GIVEN] A request applying BOTH entries in full — each row individually well-formed (non-zero,
+        // correctly signed, open, owned by the customer); only their NET is invalid.
+        Request := BuildMultiInvoiceRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer."No.",
+            CreditCustLedgerEntryNo, CreditRemaining,
+            InvoiceCustLedgerEntryNo, InvoiceRemaining);
+
+        // [WHEN/THEN] PostAndReconcile must reject it with the net guard, before any posting.
+        asserterror PmtReconService.PostAndReconcile(Request);
+        Assert.ExpectedError('must net to an amount greater than zero');
+    end;
+
+    [Test]
+    procedure PostAndReconcile_RejectsApplySignMismatch()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        CustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+    begin
+        // [SCENARIO] A signed appliesTo amount must agree with the sign of the entry it settles: a negative
+        // amount belongs against an open CREDIT, never against a receivable. A wrong-signed row would
+        // otherwise fail deep inside the base-app "Amount to Apply" validation with a message that names
+        // neither the entry nor the request; the caller must instead get the specific, entry-naming error.
+
+        // [GIVEN] A customer with one open INVOICE (positive remaining amount) and valid bank / journal /
+        // recon scaffolding, so the ONLY defect is the sign of the applied amount.
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), CustLedgerEntryNo, InvoiceAmount);
+        ArrangeBankJournalRecon(
+            BankAccount, GenJournalTemplate, GenJournalBatch, InvoiceAmount, StatementNo, StatementLineNo);
+
+        // [GIVEN] A request applying the NEGATIVE of the invoice amount to that invoice.
+        Request := BuildRequest(
+            BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo(),
+            Customer."No.", CustLedgerEntryNo, -InvoiceAmount);
+
+        // [WHEN/THEN] PostAndReconcile must reject the wrong-signed row up front, naming the sign rule.
+        asserterror PmtReconService.PostAndReconcile(Request);
+        Assert.ExpectedError('must have the same sign as');
+    end;
+
     /// <summary>
     /// Arranges the non-payment scaffolding shared by the slice-3v validation tests: a fresh bank account, a
     /// gen. journal template + batch, and ONE unmatched Bank Acc. Reconciliation line (Statement Type = Bank
@@ -1863,9 +2070,39 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
     end;
 
     /// <summary>
+    /// Posts a sales credit memo of ONE item line at the given unit price for an existing customer and
+    /// returns the resulting OPEN Cust. Ledger Entry No. and its remaining amount — which is NEGATIVE (a
+    /// credit the customer is owed). Callers pass that remaining amount to appliesTo VERBATIM: it already
+    /// carries the sign a netting application must use, so no test has to reason about the sign itself.
+    /// </summary>
+    local procedure CreatePostedCreditMemoForCustomer(CustomerNo: Code[20]; UnitPrice: Decimal; var CustLedgerEntryNo: Integer; var RemainingAmount: Decimal)
+    var
+        Item: Record Item;
+        SalesHeader: Record "Sales Header";
+        SalesLine: Record "Sales Line";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        PostedCreditMemoNo: Code[20];
+    begin
+        LibraryInventory.CreateItem(Item);
+        LibrarySales.CreateSalesHeader(SalesHeader, SalesHeader."Document Type"::"Credit Memo", CustomerNo);
+        LibrarySales.CreateSalesLine(SalesLine, SalesHeader, SalesLine.Type::Item, Item."No.", 1);
+        SalesLine.Validate("Unit Price", UnitPrice);
+        SalesLine.Modify(true);
+        PostedCreditMemoNo := LibrarySales.PostSalesDocument(SalesHeader, true, true);
+
+        CustLedgerEntry.SetRange("Document Type", CustLedgerEntry."Document Type"::"Credit Memo");
+        CustLedgerEntry.SetRange("Document No.", PostedCreditMemoNo);
+        CustLedgerEntry.FindFirst();
+        CustLedgerEntry.CalcFields("Remaining Amount");
+        CustLedgerEntryNo := CustLedgerEntry."Entry No.";
+        RemainingAmount := CustLedgerEntry."Remaining Amount";
+    end;
+
+    /// <summary>
     /// Builds a slice-4 PostAndReconcile request: ONE payments entry whose appliesTo carries TWO
-    /// entries (one customer, two invoices). Mirrors the stable JSON contract documented on codeunit
-    /// "MON Pmt Recon Service".
+    /// entries of ONE customer — two invoices, or (netting) an open credit and an invoice, in whatever
+    /// order the caller passes them. Amounts are written through verbatim, signs included. Mirrors the
+    /// stable JSON contract documented on codeunit "MON Pmt Recon Service".
     /// </summary>
     local procedure BuildMultiInvoiceRequest(BankAccountNo: Code[20]; StatementNo: Code[20]; StatementLineNo: Integer; JournalTemplateName: Code[10]; JournalBatchName: Code[10]; ExternalDocumentNo: Code[35]; CustomerNo: Code[20]; CustLedgerEntryNoA: Integer; AmountA: Decimal; CustLedgerEntryNoB: Integer; AmountB: Decimal): JsonObject
     var

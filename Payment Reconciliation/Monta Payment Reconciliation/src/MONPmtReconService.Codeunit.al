@@ -58,10 +58,15 @@ codeunit 50202 "MON Pmt Recon Service"
     ///   "payments": [                     - slice 5: ONE OR MORE entries (one per customer).
     ///     {
     ///       "customerNo": Code[20]        - customer whose payment is being posted.
-    ///       "appliesTo": [                - ONE OR MORE entries (this customer's N invoices).
+    ///       "appliesTo": [                - ONE OR MORE entries (this customer's N open entries).
     ///         {
-    ///           "custLedgerEntryNo": Integer - open Cust. Ledger Entry (invoice) settled by this apply.
-    ///           "amount":            Decimal - the received amount for this application (> 0).
+    ///           "custLedgerEntryNo": Integer - open Cust. Ledger Entry settled by this apply.
+    ///           "amount":            Decimal - the SIGNED amount applied to that entry: POSITIVE against a
+    ///                                          receivable (invoice), NEGATIVE against an open credit (credit
+    ///                                          memo / payment on account) netted off within the same receipt.
+    ///                                          Must be non-zero and share the sign of the entry's remaining
+    ///                                          amount; the set must NET to more than zero per payment, and
+    ///                                          that net (less any write-offs) is the bank receipt.
     ///         }
     ///       ]
     ///       "writeOff": [                 - slice 6: OPTIONAL; ZERO OR MORE payment-difference write-offs.
