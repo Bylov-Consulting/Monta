@@ -152,6 +152,55 @@ codeunit 50300 "MON Pmt Recon Post Tests"
     end;
 
     [Test]
+    procedure PostToReservedEntry_IsRejected()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
+        CustEntryEdit: Codeunit "Cust. Entry-Edit";
+        PmtReconPost: Codeunit "MON Pmt Recon Post";
+        CustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+    begin
+        // [SCENARIO] An open invoice ALREADY reserved by another application — in production, an applied but
+        // unposted cash-receipt journal line holding the entry's "Applies-to ID" — must be rejected with
+        // NOTHING posted. Regression guard for the production defect where "Cust. Entry-SetAppl.ID" toggled
+        // the foreign ID OFF instead of stamping ours, so the payment posted ON ACCOUNT (bank entry created,
+        // invoice left open for its full amount) while the API still reported success.
+
+        // [GIVEN] A customer with one open posted invoice, and the payment infrastructure
+        CreateCustomerWithPostedInvoice(Customer, CustLedgerEntryNo, InvoiceAmount);
+        CreatePaymentInfrastructure(BankAccount, GenJournalTemplate, GenJournalBatch);
+
+        // [GIVEN] Another, unposted application already reserves that invoice entry
+        CustLedgerEntry.Get(CustLedgerEntryNo);
+        CustLedgerEntry."Applies-to ID" := 'STAGED-JNL-LINE';
+        CustEntryEdit.Run(CustLedgerEntry);
+
+        // [WHEN] The agent posts a payment against that reserved entry
+        asserterror PmtReconPost.PostCustomerPaymentToBank(
+            Customer."No.", BankAccount."No.", InvoiceAmount, CustLedgerEntryNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+
+        // [THEN] It is rejected, naming the reservation rather than posting on account
+        Assert.ExpectedError('is already reserved for application');
+
+        // [THEN] Nothing was posted: the payment bank account has no ledger entry at all
+        BankAccLedgerEntry.SetRange("Bank Account No.", BankAccount."No.");
+        Assert.RecordIsEmpty(BankAccLedgerEntry);
+
+        // [THEN] The other application's reservation is left intact and the invoice is still open
+        CustLedgerEntry.Get(CustLedgerEntryNo);
+        Assert.AreEqual(
+            'STAGED-JNL-LINE', CustLedgerEntry."Applies-to ID",
+            'The pre-existing application must not be cleared by the rejected payment.');
+        Assert.IsTrue(CustLedgerEntry.Open, 'The invoice must remain open.');
+    end;
+
+    [Test]
     procedure PostsForeignCurrencyPaymentToForeignCurrencyBank()
     var
         Customer: Record Customer;
