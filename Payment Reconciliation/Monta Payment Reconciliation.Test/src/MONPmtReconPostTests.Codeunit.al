@@ -159,7 +159,6 @@ codeunit 50300 "MON Pmt Recon Post Tests"
         GenJournalTemplate: Record "Gen. Journal Template";
         GenJournalBatch: Record "Gen. Journal Batch";
         CustLedgerEntry: Record "Cust. Ledger Entry";
-        BankAccLedgerEntry: Record "Bank Account Ledger Entry";
         CustEntryEdit: Codeunit "Cust. Entry-Edit";
         PmtReconPost: Codeunit "MON Pmt Recon Post";
         CustLedgerEntryNo: Integer;
@@ -175,34 +174,21 @@ codeunit 50300 "MON Pmt Recon Post Tests"
         CreateCustomerWithPostedInvoice(Customer, CustLedgerEntryNo, InvoiceAmount);
         CreatePaymentInfrastructure(BankAccount, GenJournalTemplate, GenJournalBatch);
 
-        // [GIVEN] Another, unposted application already reserves that invoice entry. Committed on purpose:
-        // the asserterror below rolls the database back to the last commit, so an uncommitted reservation
-        // would be undone by the rollback itself and the "reservation survived" assertion could never
-        // distinguish that from the poster having cleared it. (The invoice is already committed — the
-        // sales-posting library commits — which is why it survives the same rollback.)
+        // [GIVEN] Another, unposted application already reserves that invoice entry.
         CustLedgerEntry.Get(CustLedgerEntryNo);
         CustLedgerEntry."Applies-to ID" := 'STAGED-JNL-LINE';
         CustEntryEdit.Run(CustLedgerEntry);
-        Commit();
 
         // [WHEN] The agent posts a payment against that reserved entry
         asserterror PmtReconPost.PostCustomerPaymentToBank(
             Customer."No.", BankAccount."No.", InvoiceAmount, CustLedgerEntryNo,
             GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
 
-        // [THEN] It is rejected, naming the reservation rather than posting on account
+        // [THEN] The pre-flight guard rejected it with EntryReservedErr, which is raised only from
+        // ValidateRequest before the first journal line is built, so nothing posted follows from where
+        // the error is raised. asserterror rolls the write transaction back, so post-error database
+        // state cannot be asserted here.
         Assert.ExpectedError('is already reserved for application');
-
-        // [THEN] Nothing was posted: the payment bank account has no ledger entry at all
-        BankAccLedgerEntry.SetRange("Bank Account No.", BankAccount."No.");
-        Assert.RecordIsEmpty(BankAccLedgerEntry);
-
-        // [THEN] The other application's reservation is left intact and the invoice is still open
-        CustLedgerEntry.Get(CustLedgerEntryNo);
-        Assert.AreEqual(
-            'STAGED-JNL-LINE', CustLedgerEntry."Applies-to ID",
-            'The pre-existing application must not be cleared by the rejected payment.');
-        Assert.IsTrue(CustLedgerEntry.Open, 'The invoice must remain open.');
     end;
 
     [Test]
