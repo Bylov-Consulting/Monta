@@ -47,6 +47,9 @@ codeunit 50304 "MON Pmt Recon Fault Inject"
     begin
         if not CorruptAmountToApply then
             exit;
-        // GREEN corrupts "Amount to Apply" here
+        // Direct assignment, not Validate: codeunit 103 then persists an amount that differs from
+        // what the poster requested while "Applies-to ID" is already correct — the failure mode
+        // the post-stamp amount check exists for.
+        CustLedgEntry."Amount to Apply" := CustLedgEntry."Amount to Apply" + 0.01;
     end;
 }
