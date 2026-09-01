@@ -189,6 +189,12 @@ codeunit 50300 "MON Pmt Recon Post Tests"
         // the error is raised. asserterror rolls the write transaction back, so post-error database
         // state cannot be asserted here.
         Assert.ExpectedError('is already reserved for application');
+
+        // [THEN] ...and the client-facing message does not carry the reserving Applies-to ID (frequently a
+        // BC user name): that value belongs in DetailedMessage, not in the text returned to the API caller.
+        Assert.IsTrue(
+            StrPos(GetLastErrorText(), 'STAGED-JNL-LINE') = 0,
+            'The reserving Applies-to ID must not appear in the client-facing error message.');
     end;
 
     [Test]
