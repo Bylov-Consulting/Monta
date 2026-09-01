@@ -25,6 +25,8 @@ codeunit 50304 "MON Pmt Recon Fault Inject"
     begin
         if not SuppressStamp then
             exit;
-        // GREEN wires IsHandled := true
+        // Base-app codeunit 101 skips the stamp entirely when IsHandled is true, leaving the
+        // entry's "Applies-to ID" blank — the failure mode the post-stamp guard exists to catch.
+        IsHandled := true;
     end;
 }
