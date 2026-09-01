@@ -325,8 +325,10 @@ codeunit 50200 "MON Pmt Recon Post"
         // Without this, any failure to stamp (SetApplId's toggle, a concurrent application taking the entry
         // between the pre-flight and here, an event subscriber clearing it) posts the payment on account and
         // still returns success. Erroring rolls back the whole PostAndReconcile transaction — nothing posts.
-        // Both checks keep the raw Applies-to ID / amount out of the client-facing Message and in
-        // DetailedMessage instead. ErrorType is deliberately left at the default (Client), not Internal:
+        // Both checks send the expected/actual Applies-to IDs, and the actual Amount to Apply found on the
+        // entry, to DetailedMessage rather than the client-facing Message. The Message itself only names the
+        // failed entry — and, for the amount check, the requested amount the caller already supplied, so
+        // nothing new is disclosed there. ErrorType is deliberately left at the default (Client), not Internal:
         // Internal replaces the message with a generic "contact your system administrator" text for the
         // API caller and for tests alike (verified against a real container) — the caller needs to see
         // which entry failed to stamp.
@@ -335,11 +337,13 @@ codeunit 50200 "MON Pmt Recon Post"
         if CustLedgerEntry."Applies-to ID" <> AppliesToID then begin
             ErrInfo := ErrorInfo.Create(StrSubstNo(ApplyIdNotStampedErr, CustLedgerEntryNo));
             ErrInfo.DetailedMessage := StrSubstNo(ApplyIdNotStampedDetailTxt, AppliesToID, CustLedgerEntry."Applies-to ID");
+            ErrInfo.DataClassification := DataClassification::EndUserIdentifiableInformation;
             Error(ErrInfo);
         end;
         if CustLedgerEntry."Amount to Apply" <> AmountToApply then begin
             ErrInfo := ErrorInfo.Create(StrSubstNo(AmountToApplyNotSetErr, CustLedgerEntryNo, AmountToApply));
             ErrInfo.DetailedMessage := StrSubstNo(AmountToApplyNotSetDetailTxt, CustLedgerEntry."Amount to Apply", AmountToApply);
+            ErrInfo.DataClassification := DataClassification::CustomerContent;
             Error(ErrInfo);
         end;
     end;
