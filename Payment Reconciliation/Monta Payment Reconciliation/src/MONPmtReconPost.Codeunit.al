@@ -9,7 +9,8 @@ codeunit 50200 "MON Pmt Recon Post"
         BankEntryNotFoundDetailTxt: Label 'No Bank Account Ledger Entry was created on bank account %1 for document %2 after posting the customer payment.', Comment = '%1 = Bank Account No., %2 = Document No.';
         ClosedEntryErr: Label 'Customer ledger entry %1 is closed and cannot be settled by this payment.', Comment = '%1 = Cust. Ledger Entry No.';
         CustomerMismatchErr: Label 'Customer ledger entry %1 does not belong to customer %2.', Comment = '%1 = Cust. Ledger Entry No., %2 = Customer No.';
-        EntryReservedErr: Label 'Customer ledger entry %1 is already reserved for application by Applies-to ID ''%2'' (an applied but unposted journal line, or another open application). Remove that application before posting this payment.', Comment = '%1 = Cust. Ledger Entry No., %2 = the Applies-to ID already on the entry';
+        EntryReservedErr: Label 'Customer ledger entry %1 is already reserved for application (an applied but unposted journal line, or another open application). Remove that application before posting this payment.', Comment = '%1 = Cust. Ledger Entry No.';
+        EntryReservedDetailTxt: Label 'Reserved by Applies-to ID ''%1''.', Comment = '%1 = the Applies-to ID already on the entry';
         ApplyIdNotStampedErr: Label 'Customer ledger entry %1 could not be reserved for this payment. Nothing was posted.', Comment = '%1 = Cust. Ledger Entry No.';
         ApplyIdNotStampedDetailTxt: Label 'Expected Applies-to ID ''%1'' but the entry carries ''%2''.', Comment = '%1 = the Applies-to ID this payment stamps, %2 = the Applies-to ID actually on the entry';
         AmountToApplyNotSetErr: Label 'Customer ledger entry %1 could not be set to apply %2. Nothing was posted.', Comment = '%1 = Cust. Ledger Entry No., %2 = the requested Amount to Apply';
@@ -381,6 +382,7 @@ codeunit 50200 "MON Pmt Recon Post"
         CustLedgerEntry: Record "Cust. Ledger Entry";
         GLAccount: Record "G/L Account";
         GenJournalBatch: Record "Gen. Journal Batch";
+        ErrInfo: ErrorInfo;
     begin
         // Cheap guard first — nothing to post.
         TempApplyBuffer.Reset();
@@ -419,8 +421,15 @@ codeunit 50200 "MON Pmt Recon Post"
                         // caller still sees a success. The usual source is an applied-but-unposted general
                         // journal line (a staged cash-receipt line) holding the entry. Reject here, in the
                         // pre-flight, so NOTHING is posted and the caller gets the entry no. and the reason.
-                        if CustLedgerEntry."Applies-to ID" <> '' then
-                            Error(EntryReservedErr, TempApplyBuffer."Cust. Ledger Entry No.", CustLedgerEntry."Applies-to ID");
+                        // The reserving Applies-to ID is frequently a BC user name (base-app codeunit 101
+                        // stamps UserId from the Apply Entries page), so it goes to DetailedMessage, never
+                        // to the client-facing message.
+                        if CustLedgerEntry."Applies-to ID" <> '' then begin
+                            ErrInfo := ErrorInfo.Create(StrSubstNo(EntryReservedErr, TempApplyBuffer."Cust. Ledger Entry No."));
+                            ErrInfo.DetailedMessage := StrSubstNo(EntryReservedDetailTxt, CustLedgerEntry."Applies-to ID");
+                            ErrInfo.DataClassification := DataClassification::EndUserIdentifiableInformation;
+                            Error(ErrInfo);
+                        end;
                     end;
                 TempApplyBuffer."Line Type"::"Write-Off":
                     begin

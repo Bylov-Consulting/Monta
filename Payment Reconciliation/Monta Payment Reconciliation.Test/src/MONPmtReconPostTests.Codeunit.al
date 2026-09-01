@@ -215,7 +215,7 @@ codeunit 50300 "MON Pmt Recon Post Tests"
         // invoice left open, API still reports success). The fault injector stands in for a concurrent
         // application or a third-party subscriber that interferes with the stamp between the pre-flight
         // check and MarkInvoiceForApplication's own re-Get. The post-stamp defence-in-depth guard
-        // (MONPmtReconPost.Codeunit.al lines 324-326) must catch this and refuse with nothing posted.
+        // (ApplyIdNotStampedErr in MarkInvoiceForApplication) must catch this and refuse with nothing posted.
 
         // [GIVEN] A customer with one open posted invoice, and the payment infrastructure (clean entry,
         // no "Applies-to ID" on it yet).
@@ -254,8 +254,8 @@ codeunit 50300 "MON Pmt Recon Post Tests"
         // subscriber on base-app "Cust. Entry-Edit".OnBeforeCustLedgEntryModify changes it after the ID
         // and amount are already correct in memory. Settling the wrong amount would leave the difference
         // on account while the entry still carries THIS payment's Applies-to ID, so the ID check alone
-        // cannot catch it. The post-stamp defence-in-depth guard (MONPmtReconPost.Codeunit.al lines
-        // 327-328) must refuse with nothing posted.
+        // cannot catch it. The post-stamp defence-in-depth guard (AmountToApplyNotSetErr in
+        // MarkInvoiceForApplication) must refuse with nothing posted.
 
         // [GIVEN] A customer with one open posted invoice, and the payment infrastructure (clean entry,
         // no "Applies-to ID" on it yet).
