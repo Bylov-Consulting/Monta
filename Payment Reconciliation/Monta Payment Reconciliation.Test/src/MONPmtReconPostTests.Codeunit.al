@@ -232,6 +232,46 @@ codeunit 50300 "MON Pmt Recon Post Tests"
     end;
 
     [Test]
+    procedure PostWhenAmountToApplyCorrupted_IsRejected()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        PmtReconPost: Codeunit "MON Pmt Recon Post";
+        FaultInject: Codeunit "MON Pmt Recon Fault Inject";
+        CustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+    begin
+        // [SCENARIO] Production defect this pins: the "Applies-to ID" stamp lands correctly, but the
+        // "Amount to Apply" the posting engine will actually apply is not the requested one — here, a
+        // subscriber on base-app "Cust. Entry-Edit".OnBeforeCustLedgEntryModify changes it after the ID
+        // and amount are already correct in memory. Settling the wrong amount would leave the difference
+        // on account while the entry still carries THIS payment's Applies-to ID, so the ID check alone
+        // cannot catch it. The post-stamp defence-in-depth guard (MONPmtReconPost.Codeunit.al lines
+        // 327-328) must refuse with nothing posted.
+
+        // [GIVEN] A customer with one open posted invoice, and the payment infrastructure (clean entry,
+        // no "Applies-to ID" on it yet).
+        CreateCustomerWithPostedInvoice(Customer, CustLedgerEntryNo, InvoiceAmount);
+        CreatePaymentInfrastructure(BankAccount, GenJournalTemplate, GenJournalBatch);
+
+        // [GIVEN] The amount is corrupted for this post: "Cust. Entry-Edit" fires OnBeforeCustLedgEntryModify
+        // but the entry's "Amount to Apply" does not end up matching the requested amount.
+        FaultInject.SetCorruptAmountToApply(true);
+        BindSubscription(FaultInject);
+
+        // [WHEN] The agent posts the full invoice amount against that entry
+        asserterror PmtReconPost.PostCustomerPaymentToBank(
+            Customer."No.", BankAccount."No.", InvoiceAmount, CustLedgerEntryNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+        UnbindSubscription(FaultInject);
+
+        // [THEN] The post-stamp guard rejected it — nothing posted on account.
+        Assert.ExpectedError('could not be set to apply');
+    end;
+
+    [Test]
     procedure PostsForeignCurrencyPaymentToForeignCurrencyBank()
     var
         Customer: Record Customer;
