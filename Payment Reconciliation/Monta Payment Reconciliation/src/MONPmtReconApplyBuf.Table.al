@@ -31,8 +31,10 @@ table 50200 "MON Pmt Recon Apply Buf"
         field(4; "Amount to Apply"; Decimal)
         {
             Caption = 'Amount to Apply';
-            // For a Customer Apply row: the amount applied to "Cust. Ledger Entry No.".
-            // For a Write-Off row: the difference amount W posted to "G/L Account No." (debit).
+            // For a Customer Apply row: the SIGNED amount applied to "Cust. Ledger Entry No." — positive
+            // against a receivable, negative against an open credit netted off in the same receipt. The
+            // rows of one customer net to that customer's payment line.
+            // For a Write-Off row: the difference amount W posted to "G/L Account No." (debit, always > 0).
         }
         field(5; "Line Type"; Option)
         {

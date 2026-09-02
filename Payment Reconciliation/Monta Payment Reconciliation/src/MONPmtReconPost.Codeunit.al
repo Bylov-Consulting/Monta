@@ -3,7 +3,10 @@ codeunit 50200 "MON Pmt Recon Post"
     Access = Public;
 
     var
-        PaymentAmountErr: Label 'The payment amount must be greater than zero.';
+        ZeroApplyAmountErr: Label 'The amount applied to customer ledger entry %1 must not be zero.', Comment = '%1 = Cust. Ledger Entry No.';
+        ApplySignMismatchErr: Label 'The amount applied to customer ledger entry %1 (%2) must have the same sign as that entry''s remaining amount (%3).', Comment = '%1 = Cust. Ledger Entry No., %2 = amount to apply, %3 = the entry''s remaining amount';
+        NonPositiveCustomerTotalErr: Label 'The entries applied for customer %1 net to %2. An incoming payment must net to an amount greater than zero.', Comment = '%1 = Customer No., %2 = the net of that customer''s applications';
+        WriteOffAmountErr: Label 'The write-off amount for G/L account %1 must be greater than zero.', Comment = '%1 = G/L Account No.';
         NoAppliesEntriesErr: Label 'At least one customer ledger entry must be supplied for the payment.';
         BankEntryNotFoundErr: Label 'The payment posting did not create the expected Bank Account Ledger Entry.';
         BankEntryNotFoundDetailTxt: Label 'No Bank Account Ledger Entry was created on bank account %1 for document %2 after posting the customer payment.', Comment = '%1 = Bank Account No., %2 = Document No.';
@@ -59,7 +62,7 @@ codeunit 50200 "MON Pmt Recon Post"
     /// </summary>
     /// <param name="CustomerNo">The customer whose payment is being posted.</param>
     /// <param name="BankAccountNo">The bank account the payment is received into; the balancing entry is posted here.</param>
-    /// <param name="AppliesToEntries">Map of open Cust. Ledger Entry No. -> the amount (> 0) to apply to it. Each entry must belong to CustomerNo and be open.</param>
+    /// <param name="AppliesToEntries">Map of open Cust. Ledger Entry No. -> the SIGNED amount to apply to it: positive against a receivable (invoice), negative against an open credit (credit memo / payment on account) being netted off in the same receipt. Each amount must be non-zero and share the sign of its entry's remaining amount; each entry must belong to CustomerNo and be open; and the amounts must NET to more than zero.</param>
     /// <param name="GenJnlTemplateName">General journal template used to post the payment.</param>
     /// <param name="GenJnlBatchName">General journal batch (within the template) used to post the payment.</param>
     /// <param name="ExternalDocumentNo">Optional external document reference stamped on the payment line.</param>
@@ -98,11 +101,13 @@ codeunit 50200 "MON Pmt Recon Post"
     /// Ledger Entry for the grand total (left open for reconciliation).
     ///
     /// The document is built as: for EACH customer one Gen. Journal payment line carrying the NEGATIVE
-    /// of that customer's total, stamped with that customer's OWN distinct Applies-to ID (so only that
-    /// customer's invoices are settled by that leg) and with NO balancing account; plus ONE final Bank
-    /// Account line carrying the POSITIVE grand total with no applies and no balancing account. The N
-    /// customer credits (-totals) and the one bank debit (+grandTotal) net to zero, so the document
-    /// balances. All lines share one Document No. / Posting Date and are posted through a SINGLE
+    /// of that customer's NET total (its positive applies less any negative ones — an open credit memo or
+    /// payment on account netted off within the same receipt), stamped with that customer's OWN distinct
+    /// Applies-to ID (so only that customer's entries are settled by that leg) and with NO balancing
+    /// account; plus ONE final Bank Account line carrying the POSITIVE grand total with no applies and
+    /// no balancing account. The N customer credits (-net totals) and the one bank debit (+grandTotal)
+    /// net to zero, so the document balances.
+    /// All lines share one Document No. / Posting Date and are posted through a SINGLE
     /// "Gen. Jnl.-Post Line" instance in ascending Line No. order: the instance accumulates the running
     /// balance across the lines exactly as base-app codeunit 13 "Gen. Jnl.-Post Batch" does, and the
     /// single Bank Account line produces exactly ONE Bank Account Ledger Entry for the grand total.
@@ -110,7 +115,7 @@ codeunit 50200 "MON Pmt Recon Post"
     /// transaction; the standard consistency check fires only at the outer commit, by which point the
     /// document is balanced.
     /// </summary>
-    /// <param name="TempApplyBuffer">Temporary buffer with one row per (Customer No., Cust. Ledger Entry No., Amount to Apply). Each amount must be > 0 and each entry must be open and belong to its row's customer.</param>
+    /// <param name="TempApplyBuffer">Temporary buffer with one row per (Customer No., Cust. Ledger Entry No., Amount to Apply). Customer Apply amounts are SIGNED — positive against a receivable, negative against an open credit netted off in the same receipt — non-zero, signed like their entry's remaining amount, and netting to more than zero per customer; Write-Off amounts are strictly positive. Each applied entry must be open and belong to its row's customer.</param>
     /// <param name="BankAccountNo">The bank account the payment is received into; the single bank line is posted here.</param>
     /// <param name="PostingDate">The date all document lines post on (and the No. Series draws against). Callers with statement context supply the reconciliation line's transaction/statement date so the bank entry lands in the statement's period.</param>
     /// <param name="GenJnlTemplateName">General journal template used to post the payment.</param>
@@ -156,9 +161,10 @@ codeunit 50200 "MON Pmt Recon Post"
         BankAccount.Get(BankAccountNo);
         PaymentCurrencyCode := BankAccount."Currency Code";
 
-        // One Document No. for the whole balanced payment document. The bank (cash) line is the customer
-        // applies LESS the write-offs: write-offs settle invoice value against a G/L account, never the
-        // bank, so the bank receipt equals the cash actually received.
+        // One Document No. for the whole balanced payment document. The bank (cash) line is the NET of the
+        // customer applies (signed, so any netted-off credits reduce it) LESS the write-offs: write-offs
+        // settle invoice value against a G/L account, never the bank, so the bank receipt equals the cash
+        // actually received.
         DocumentNo := this.DetermineDocumentNo(GenJournalBatch, PostingDate);
         AppliesTotal := this.SumBuffer(TempApplyBuffer, TempApplyBuffer."Line Type"::"Customer Apply");
         WriteOffTotal := this.SumBuffer(TempApplyBuffer, TempApplyBuffer."Line Type"::"Write-Off");
@@ -201,8 +207,9 @@ codeunit 50200 "MON Pmt Recon Post"
                 CustomerTotal += TempApplyBuffer."Amount to Apply";
             until TempApplyBuffer.Next() = 0;
 
-            // The customer leg: negative total (a credit settling the positive invoices), NO bal account
-            // (it balances against the single bank line at the end of the document).
+            // The customer leg: the negative of the NET total (a credit settling the applied set — the
+            // receivables less any open credits netted off with them), NO bal account (it balances
+            // against the single bank line at the end of the document).
             LineNo += 10000;
             GenJournalLine.Init();
             GenJournalLine.Validate("Journal Template Name", GenJournalTemplate.Name);
@@ -387,6 +394,8 @@ codeunit 50200 "MON Pmt Recon Post"
         GLAccount: Record "G/L Account";
         GenJournalBatch: Record "Gen. Journal Batch";
         ErrInfo: ErrorInfo;
+        CustomerNetTotals: Dictionary of [Code[20], Decimal];
+        CustomerNo: Code[20];
     begin
         // Cheap guard first — nothing to post.
         TempApplyBuffer.Reset();
@@ -398,20 +407,27 @@ codeunit 50200 "MON Pmt Recon Post"
         GenJournalBatch.SetLoadFields("Name");
         GenJournalBatch.Get(GenJnlTemplateName, GenJnlBatchName);
 
-        // Every row must carry a positive amount; the remaining guards are per row type: Customer Apply
-        // rows must name an existing customer that owns an open ledger entry, while Write-Off rows must
-        // name an existing G/L account (direct-posting is left for the posting engine to enforce).
+        // Per-row guards by row type. A Customer Apply row must name an existing customer that owns an
+        // OPEN ledger entry, and carry a NON-ZERO amount whose sign AGREES with that entry's remaining
+        // amount — positive against a receivable (invoice), negative against an open credit (credit memo
+        // or payment on account). A negative row is how such a credit is netted off inside the SAME
+        // receipt: it is the application set BC's own Apply Customer Entries page builds, and the
+        // customer leg below posts the NET. A Write-Off row must name an existing G/L account
+        // (direct-posting is left for the posting engine to enforce) and stay strictly positive: a
+        // write-off is always a debit absorbing a shortfall, never a credit.
         TempApplyBuffer.FindSet();
         repeat
-            if TempApplyBuffer."Amount to Apply" <= 0 then
-                Error(PaymentAmountErr);
-
             case TempApplyBuffer."Line Type" of
                 TempApplyBuffer."Line Type"::"Customer Apply":
                     begin
+                        if TempApplyBuffer."Amount to Apply" = 0 then
+                            Error(ZeroApplyAmountErr, TempApplyBuffer."Cust. Ledger Entry No.");
+
                         Customer.SetLoadFields("No.");
                         Customer.Get(TempApplyBuffer."Customer No.");
 
+                        // "Remaining Amount" is a FlowField, so it is computed by the CalcFields below
+                        // rather than loaded here.
                         CustLedgerEntry.SetLoadFields("Customer No.", Open, "Applies-to ID");
                         CustLedgerEntry.Get(TempApplyBuffer."Cust. Ledger Entry No.");
                         if CustLedgerEntry."Customer No." <> TempApplyBuffer."Customer No." then
@@ -434,13 +450,43 @@ codeunit 50200 "MON Pmt Recon Post"
                             ErrInfo.DataClassification := DataClassification::EndUserIdentifiableInformation;
                             Error(ErrInfo);
                         end;
+
+                        // Sign agreement is what the base-app "Amount to Apply" validation enforces as well;
+                        // checking it here surfaces the entry-naming, actionable message BEFORE any entry is
+                        // stamped or any line posted.
+                        CustLedgerEntry.CalcFields("Remaining Amount");
+                        if TempApplyBuffer."Amount to Apply" * CustLedgerEntry."Remaining Amount" < 0 then
+                            Error(
+                                ApplySignMismatchErr,
+                                TempApplyBuffer."Cust. Ledger Entry No.", TempApplyBuffer."Amount to Apply",
+                                CustLedgerEntry."Remaining Amount");
+
+                        // Accumulate this customer's NET application; checked once every row is known (below).
+                        if CustomerNetTotals.ContainsKey(TempApplyBuffer."Customer No.") then
+                            CustomerNetTotals.Set(
+                                TempApplyBuffer."Customer No.",
+                                CustomerNetTotals.Get(TempApplyBuffer."Customer No.") + TempApplyBuffer."Amount to Apply")
+                        else
+                            CustomerNetTotals.Add(TempApplyBuffer."Customer No.", TempApplyBuffer."Amount to Apply");
                     end;
                 TempApplyBuffer."Line Type"::"Write-Off":
                     begin
+                        if TempApplyBuffer."Amount to Apply" <= 0 then
+                            Error(WriteOffAmountErr, TempApplyBuffer."G/L Account No.");
+
                         GLAccount.SetLoadFields("No.");
                         GLAccount.Get(TempApplyBuffer."G/L Account No.");
                     end;
             end;
         until TempApplyBuffer.Next() = 0;
+
+        // Each customer's applications must NET to a positive amount: that net becomes this customer's
+        // single payment line, posted as its NEGATIVE (a credit settling the applied set). A zero net
+        // would post an empty line and a negative net would post a customer DEBIT — a refund, not an
+        // incoming receipt. Reject either up front, naming the customer and the offending net, rather
+        // than letting it reach the posting engine as an opaque failure.
+        foreach CustomerNo in CustomerNetTotals.Keys() do
+            if CustomerNetTotals.Get(CustomerNo) <= 0 then
+                Error(NonPositiveCustomerTotalErr, CustomerNo, CustomerNetTotals.Get(CustomerNo));
     end;
 }
