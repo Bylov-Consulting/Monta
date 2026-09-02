@@ -233,7 +233,7 @@ codeunit 50202 "MON Pmt Recon Service"
     /// rejected with a clear, actionable error rather than an opaque downstream failure:
     /// (1) each required header field (bankAccountNo, statementNo, journalTemplateName, journalBatchName)
     ///     must be present and non-blank; (2) payments must be a non-empty array; (3) each payment must
-    ///     carry a non-empty appliesTo array; (4) no custLedgerEntryNo may repeat within one payment.
+    ///     carry a non-empty appliesTo array; (4) no custLedgerEntryNo may repeat anywhere in the request.
     /// </summary>
     local procedure ValidateRequest(Request: JsonObject)
     var
@@ -263,7 +263,10 @@ codeunit 50202 "MON Pmt Recon Service"
         if PaymentsTok.AsArray().Count() = 0 then
             Error(NoPaymentsErr);
 
-        // (3) + (4) per-payment appliesTo presence and duplicate detection.
+        // (3) + (4) per-payment appliesTo presence, and duplicate detection across the WHOLE request.
+        // SeenEntryNos is deliberately accumulated across payments, not reset per payment: naming the same
+        // cust. ledger entry from two payments would have the second application toggle the first one's
+        // Applies-to ID off the entry, posting on account. One entry, one application, per request.
         foreach PaymentTok in PaymentsTok.AsArray() do begin
             PaymentObj := PaymentTok.AsObject();
 
@@ -274,7 +277,6 @@ codeunit 50202 "MON Pmt Recon Service"
             if AppliesToTok.AsArray().Count() = 0 then
                 Error(PaymentNoAppliesErr);
 
-            Clear(SeenEntryNos);
             foreach AppliesToEntryTok in AppliesToTok.AsArray() do begin
                 CustLedgerEntryNo := this.GetInt(AppliesToEntryTok.AsObject(), 'custLedgerEntryNo');
                 if SeenEntryNos.Contains(CustLedgerEntryNo) then

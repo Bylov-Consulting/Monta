@@ -9,6 +9,12 @@ codeunit 50200 "MON Pmt Recon Post"
         BankEntryNotFoundDetailTxt: Label 'No Bank Account Ledger Entry was created on bank account %1 for document %2 after posting the customer payment.', Comment = '%1 = Bank Account No., %2 = Document No.';
         ClosedEntryErr: Label 'Customer ledger entry %1 is closed and cannot be settled by this payment.', Comment = '%1 = Cust. Ledger Entry No.';
         CustomerMismatchErr: Label 'Customer ledger entry %1 does not belong to customer %2.', Comment = '%1 = Cust. Ledger Entry No., %2 = Customer No.';
+        EntryReservedErr: Label 'Customer ledger entry %1 is already reserved for application (an applied but unposted journal line, or another open application). Remove that application before posting this payment.', Comment = '%1 = Cust. Ledger Entry No.';
+        EntryReservedDetailTxt: Label 'Reserved by Applies-to ID ''%1''.', Comment = '%1 = the Applies-to ID already on the entry';
+        ApplyIdNotStampedErr: Label 'Customer ledger entry %1 could not be reserved for this payment. Nothing was posted.', Comment = '%1 = Cust. Ledger Entry No.';
+        ApplyIdNotStampedDetailTxt: Label 'Expected Applies-to ID ''%1'' but the entry carries ''%2''.', Comment = '%1 = the Applies-to ID this payment stamps, %2 = the Applies-to ID actually on the entry';
+        AmountToApplyNotSetErr: Label 'Customer ledger entry %1 could not be set to apply %2. Nothing was posted.', Comment = '%1 = Cust. Ledger Entry No., %2 = the requested Amount to Apply';
+        AmountToApplyNotSetDetailTxt: Label 'The entry carries Amount to Apply %1 instead of the requested %2.', Comment = '%1 = the Amount to Apply actually on the entry, %2 = the requested Amount to Apply';
         InvalidBankAmountErr: Label 'The total write-off amount (%1) must be less than the total applied amount (%2).', Comment = '%1 = write-off total, %2 = applied total';
         MissingNoSeriesErr: Label 'General journal batch %1/%2 has no No. Series. Configure a No. Series on the batch so payment documents draw controlled, auditable numbers.', Comment = '%1 = Journal Template Name, %2 = Journal Batch Name';
 
@@ -297,6 +303,7 @@ codeunit 50200 "MON Pmt Recon Post"
         ApplyingCustLedgerEntry: Record "Cust. Ledger Entry";
         CustEntrySetApplID: Codeunit "Cust. Entry-SetAppl.ID";
         CustEntryEdit: Codeunit "Cust. Entry-Edit";
+        ErrInfo: ErrorInfo;
     begin
         // Stamp the customer's Applies-to ID on this entry via the standard mechanism. ApplyingCustLedgerEntry
         // is left blank (Entry No. = 0): no partial-apply origin, so SetApplId also defaults "Amount to
@@ -312,6 +319,33 @@ codeunit 50200 "MON Pmt Recon Post"
         CustLedgerEntry.Get(CustLedgerEntryNo);
         CustLedgerEntry.Validate("Amount to Apply", AmountToApply);
         CustEntryEdit.Run(CustLedgerEntry);
+
+        // Defence in depth behind the pre-flight reserved-entry guard: re-read what actually landed on the
+        // entry and refuse to continue unless it carries THIS payment's Applies-to ID for THIS amount.
+        // Without this, any failure to stamp (SetApplId's toggle, a concurrent application taking the entry
+        // between the pre-flight and here, an event subscriber clearing it) posts the payment on account and
+        // still returns success. Erroring rolls back the whole PostAndReconcile transaction — nothing posts.
+        // Both checks send the expected/actual Applies-to IDs, and the actual Amount to Apply found on the
+        // entry, to DetailedMessage rather than the client-facing Message. The Message itself only names the
+        // failed entry — and, for the amount check, the requested amount the caller already supplied, so
+        // nothing new is disclosed there. ErrorType is deliberately left at the default (Client), not Internal:
+        // Internal replaces the message with a generic "contact your system administrator" text for the
+        // API caller and for tests alike (verified against a real container) — the caller needs to see
+        // which entry failed to stamp.
+        CustLedgerEntry.SetLoadFields("Applies-to ID", "Amount to Apply");
+        CustLedgerEntry.Get(CustLedgerEntryNo);
+        if CustLedgerEntry."Applies-to ID" <> AppliesToID then begin
+            ErrInfo := ErrorInfo.Create(StrSubstNo(ApplyIdNotStampedErr, CustLedgerEntryNo));
+            ErrInfo.DetailedMessage := StrSubstNo(ApplyIdNotStampedDetailTxt, AppliesToID, CustLedgerEntry."Applies-to ID");
+            ErrInfo.DataClassification := DataClassification::EndUserIdentifiableInformation;
+            Error(ErrInfo);
+        end;
+        if CustLedgerEntry."Amount to Apply" <> AmountToApply then begin
+            ErrInfo := ErrorInfo.Create(StrSubstNo(AmountToApplyNotSetErr, CustLedgerEntryNo, AmountToApply));
+            ErrInfo.DetailedMessage := StrSubstNo(AmountToApplyNotSetDetailTxt, CustLedgerEntry."Amount to Apply", AmountToApply);
+            ErrInfo.DataClassification := DataClassification::CustomerContent;
+            Error(ErrInfo);
+        end;
     end;
 
     local procedure DetermineDocumentNo(GenJournalBatch: Record "Gen. Journal Batch"; PostingDate: Date): Code[20]
@@ -352,6 +386,7 @@ codeunit 50200 "MON Pmt Recon Post"
         CustLedgerEntry: Record "Cust. Ledger Entry";
         GLAccount: Record "G/L Account";
         GenJournalBatch: Record "Gen. Journal Batch";
+        ErrInfo: ErrorInfo;
     begin
         // Cheap guard first — nothing to post.
         TempApplyBuffer.Reset();
@@ -377,12 +412,28 @@ codeunit 50200 "MON Pmt Recon Post"
                         Customer.SetLoadFields("No.");
                         Customer.Get(TempApplyBuffer."Customer No.");
 
-                        CustLedgerEntry.SetLoadFields("Customer No.", Open);
+                        CustLedgerEntry.SetLoadFields("Customer No.", Open, "Applies-to ID");
                         CustLedgerEntry.Get(TempApplyBuffer."Cust. Ledger Entry No.");
                         if CustLedgerEntry."Customer No." <> TempApplyBuffer."Customer No." then
                             Error(CustomerMismatchErr, TempApplyBuffer."Cust. Ledger Entry No.", TempApplyBuffer."Customer No.");
                         if not CustLedgerEntry.Open then
                             Error(ClosedEntryErr, TempApplyBuffer."Cust. Ledger Entry No.");
+                        // An entry another application already reserved CANNOT be settled by this payment:
+                        // "Cust. Entry-SetAppl.ID" TOGGLES, so handed an entry that already carries an
+                        // "Applies-to ID" it CLEARS that ID instead of stamping ours. The payment then posts
+                        // ON ACCOUNT — bank entry created, invoice left open for its full amount — and the
+                        // caller still sees a success. The usual source is an applied-but-unposted general
+                        // journal line (a staged cash-receipt line) holding the entry. Reject here, in the
+                        // pre-flight, so NOTHING is posted and the caller gets the entry no. and the reason.
+                        // The reserving Applies-to ID is frequently a BC user name (base-app codeunit 101
+                        // stamps UserId from the Apply Entries page), so it goes to DetailedMessage, never
+                        // to the client-facing message.
+                        if CustLedgerEntry."Applies-to ID" <> '' then begin
+                            ErrInfo := ErrorInfo.Create(StrSubstNo(EntryReservedErr, TempApplyBuffer."Cust. Ledger Entry No."));
+                            ErrInfo.DetailedMessage := StrSubstNo(EntryReservedDetailTxt, CustLedgerEntry."Applies-to ID");
+                            ErrInfo.DataClassification := DataClassification::EndUserIdentifiableInformation;
+                            Error(ErrInfo);
+                        end;
                     end;
                 TempApplyBuffer."Line Type"::"Write-Off":
                     begin

@@ -1547,6 +1547,64 @@ codeunit 50302 "MON Pmt Recon Svc Tests"
     end;
 
     [Test]
+    procedure PostAndReconcile_RejectsDuplicateApplyAcrossPayments()
+    var
+        Customer: Record Customer;
+        BankAccount: Record "Bank Account";
+        GenJournalTemplate: Record "Gen. Journal Template";
+        GenJournalBatch: Record "Gen. Journal Batch";
+        PmtReconService: Codeunit "MON Pmt Recon Service";
+        Request: JsonObject;
+        Payment1: JsonObject;
+        Payment2: JsonObject;
+        AppliesToEntry1: JsonObject;
+        AppliesToEntry2: JsonObject;
+        Payments: JsonArray;
+        AppliesTo1: JsonArray;
+        AppliesTo2: JsonArray;
+        CustLedgerEntryNo: Integer;
+        InvoiceAmount: Decimal;
+        StatementNo: Code[20];
+        StatementLineNo: Integer;
+    begin
+        // [SCENARIO] The duplicate guard spans the WHOLE request, not one payment: the same customer ledger
+        // entry named from TWO payments must be rejected up front. The second application would otherwise
+        // toggle the first one's Applies-to ID back off the entry, posting the receipt ON ACCOUNT with the
+        // invoice left open — the same silent failure as a foreign reservation.
+
+        // [GIVEN] A customer with ONE open invoice and a valid bank/journal/recon line
+        LibrarySales.CreateCustomer(Customer);
+        CreatePostedInvoiceForCustomer(
+            Customer."No.", LibraryRandom.RandDecInRange(100, 1000, 2), CustLedgerEntryNo, InvoiceAmount);
+        ArrangeBankJournalRecon(
+            BankAccount, GenJournalTemplate, GenJournalBatch, InvoiceAmount, StatementNo, StatementLineNo);
+
+        // [GIVEN] TWO payments for that customer, each naming the SAME custLedgerEntryNo once
+        AppliesToEntry1.Add('custLedgerEntryNo', CustLedgerEntryNo);
+        AppliesToEntry1.Add('amount', InvoiceAmount / 2);
+        AppliesTo1.Add(AppliesToEntry1);
+        Payment1.Add('customerNo', Customer."No.");
+        Payment1.Add('appliesTo', AppliesTo1);
+        Payments.Add(Payment1);
+
+        AppliesToEntry2.Add('custLedgerEntryNo', CustLedgerEntryNo); // same entry, a DIFFERENT payment
+        AppliesToEntry2.Add('amount', InvoiceAmount / 2);
+        AppliesTo2.Add(AppliesToEntry2);
+        Payment2.Add('customerNo', Customer."No.");
+        Payment2.Add('appliesTo', AppliesTo2);
+        Payments.Add(Payment2);
+
+        AddRequestHeader(
+            Request, BankAccount."No.", StatementNo, StatementLineNo,
+            GenJournalTemplate.Name, GenJournalBatch.Name, NewExternalDocNo());
+        Request.Add('payments', Payments);
+
+        // [WHEN/THEN] PostAndReconcile rejects it with the same "appears more than once" message
+        asserterror PmtReconService.PostAndReconcile(Request);
+        Assert.ExpectedError('appears more than once');
+    end;
+
+    [Test]
     procedure PostAndReconcile_RejectsWriteOffGeApplied()
     var
         Customer: Record Customer;
