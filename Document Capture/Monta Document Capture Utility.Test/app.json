@@ -2,7 +2,7 @@
   "id": "4bdd7546-226e-4325-8d19-1b5d9fcb4fc5",
   "name": "Monta Document Capture Utility.Test",
   "publisher": "Bylov Consulting",
-  "version": "1.4.0.0",
+  "version": "1.5.0.0",
   "brief": "",
   "description": "Test app for Monta Document Capture Utility.",
   "privacyStatement": "",
@@ -15,7 +15,7 @@
       "id": "2ce68cba-96aa-4f2b-80bd-502b16187a0f",
       "name": "Monta Document Capture Utility",
       "publisher": "Bylov Consulting",
-      "version": "1.4.0.0"
+      "version": "1.5.0.0"
     },
     {
       "id": "6da8dd2f-e698-461f-9147-8e404244dd85",
